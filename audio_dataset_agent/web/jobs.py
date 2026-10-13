@@ -1,0 +1,583 @@
+from __future__ import annotations
+"""Web 任务编排层。
+
+这里把前端表单参数转换成后台 job，再把真正耗时的音频 pipeline 放到线程中执行。
+Web 层不直接做音频分析；它负责准备工具实例、记录任务状态、生成前端 summary，
+并生成本地任务摘要。
+"""
+
+import inspect
+import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Literal
+
+from audio_dataset_agent.analyzers.vad import (
+    FixedVADAnalyzer,
+    SpeechSegment,
+    WaveEnergyVADAnalyzer,
+    WholeFileVADAnalyzer,
+)
+from audio_dataset_agent.cli import resolve_ffmpeg_path
+from audio_dataset_agent.curation.agent import LLMCuratorAgent
+from audio_dataset_agent.curation.policy import BaselineCurationPolicy
+from audio_dataset_agent.curation.qwen_client import TransformersQwenClient
+from audio_dataset_agent.inspection.audio_metrics import WaveAudioMetricsAnalyzer
+from audio_dataset_agent.inspection.consistency import BatchAcousticConsistencyAnalyzer
+from audio_dataset_agent.knowledge.retriever import LocalKnowledgeRetriever
+from audio_dataset_agent.importer.metadata import MetadataImportConfig
+from audio_dataset_agent.orchestrator.workflow import run_batch_pipeline, run_repair_enabled_pipeline
+from audio_dataset_agent.portfolio.context import build_local_portfolio_research
+from audio_dataset_agent.portfolio.renderer import write_portfolio_artifacts
+from audio_dataset_agent.processing.ffmpeg_normalizer import FFmpegAudioNormalizer
+from audio_dataset_agent.repair.executor import CompositeRepairExecutor, FFmpegRepairExecutor
+from audio_dataset_agent.reporting.agent import DatasetReportAgent, LLMDatasetReportAgent
+from audio_dataset_agent.segmentation.materializer import FFmpegSampleMaterializer
+from audio_dataset_agent.strategy.agent import BaselineProcessingStrategyAgent, LLMProcessingStrategyAgent
+from audio_dataset_agent.tools.registry import default_tool_registry
+from audio_dataset_agent.transcription.faster_whisper_transcriber import FasterWhisperTranscriber
+from audio_dataset_agent.transcription.transcriber import FixedTranscriber, TranscriptResult
+from audio_dataset_agent.web.summary import build_summary_from_export_dir, write_summary_file
+
+
+WorkflowName = Literal["basic", "repair"]
+TargetPolicy = Literal["voice_clone", "tts", "asr"]
+AsrMode = Literal["none", "fixed", "faster-whisper"]
+VadMode = Literal["fixed", "wave-energy", "whole-file"]
+StrategyAgentMode = Literal["baseline", "qwen-local"]
+CuratorAgentMode = Literal["baseline", "qwen-local"]
+ReportAgentMode = Literal["deterministic", "qwen-local"]
+JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _progress(
+    current_stage: str,
+    stage_message: str,
+    percent: int,
+    processed_samples: int = 0,
+    total_samples: int = 0,
+) -> dict[str, Any]:
+    return {
+        "current_stage": current_stage,
+        "stage_message": stage_message,
+        "processed_samples": processed_samples,
+        "total_samples": total_samples,
+        "percent": max(0, min(100, int(percent))),
+    }
+
+
+@dataclass
+class RunRequest:
+    # 前端一次运行会固化成 RunRequest；后台线程只读这个快照，不再依赖页面状态。
+    input_dir: str
+    target_policy: TargetPolicy = "voice_clone"
+    workflow: WorkflowName = "basic"
+    asr: AsrMode = "none"
+    vad: VadMode = "wave-energy"
+    strategy_agent: StrategyAgentMode = "baseline"
+    curator_agent: CuratorAgentMode = "baseline"
+    report_agent: ReportAgentMode = "deterministic"
+    qwen_model_path: str = "local_tools/models/qwen/Qwen3-4B-Instruct-2507"
+    qwen_max_new_tokens: int = 192
+    llm_only_issue_samples: bool = True
+    curator_confidence_threshold: float = 0.8
+    speaker_consistency_check: bool = False
+    demo_transcript: str = "demo transcript"
+    demo_confidence: float = 0.95
+    vad_min_duration_seconds: float = 0.6
+    vad_merge_gap_seconds: float = 0.45
+    metadata_path: str = ""
+    metadata_audio_column: str = "audio_path"
+    metadata_text_column: str = "text"
+    metadata_language_column: str = "language"
+    metadata_speaker_column: str = "speaker_id"
+    use_sidecar_text: bool = True
+    repair_chain: str = "single"
+    rag_mode: str = "none"
+    rag_documents: str = "knowledge_base/documents"
+    rag_index: str = "local_tools/cache/rag/index.sqlite"
+    rag_rebuild: bool = False
+
+    def to_run_config(self, ffmpeg_path: str) -> dict[str, Any]:
+        """生成可写入批次产物的运行参数快照，不包含密钥。"""
+        return {
+            "target_policy": self.target_policy,
+            "workflow": self.workflow,
+            "asr": self.asr,
+            "vad": self.vad,
+            "strategy_agent": self.strategy_agent,
+            "curator_agent": self.curator_agent,
+            "report_agent": self.report_agent,
+            "llm_only_issue_samples": self.llm_only_issue_samples,
+            "curator_confidence_threshold": self.curator_confidence_threshold,
+            "speaker_consistency_check": self.speaker_consistency_check,
+            "qwen_max_new_tokens": self.qwen_max_new_tokens,
+            "vad_min_duration_seconds": self.vad_min_duration_seconds,
+            "vad_merge_gap_seconds": self.vad_merge_gap_seconds,
+            "models": {
+                "qwen": self.qwen_model_path,
+                "faster_whisper": (
+                    "local_tools/models/faster-whisper/small"
+                    if self.asr == "faster-whisper"
+                    else None
+                ),
+            },
+            "tools": {"ffmpeg_path": ffmpeg_path},
+            "metadata": {
+                "path": self.metadata_path or None,
+                "audio_column": self.metadata_audio_column,
+                "text_column": self.metadata_text_column,
+                "language_column": self.metadata_language_column,
+                "speaker_column": self.metadata_speaker_column,
+                "use_sidecar_text": self.use_sidecar_text,
+            },
+            "repair_chain": self.repair_chain,
+            "rag": {
+                "mode": self.rag_mode,
+                "documents": self.rag_documents,
+                "index": self.rag_index,
+                "rebuild": self.rag_rebuild,
+            },
+        }
+
+    def to_metadata_config(self) -> MetadataImportConfig:
+        return MetadataImportConfig(
+            metadata_path=self.metadata_path or None,
+            audio_column=self.metadata_audio_column,
+            text_column=self.metadata_text_column,
+            language_column=self.metadata_language_column,
+            speaker_column=self.metadata_speaker_column,
+            use_sidecar_text=self.use_sidecar_text,
+        )
+
+
+@dataclass
+class AudioDatasetJob:
+    # Job 保存 Web 视角的任务状态、导出目录、summary 和错误信息。
+    job_id: str
+    request: RunRequest
+    status: JobStatus = "queued"
+    created_at: str = field(default_factory=_now_iso)
+    updated_at: str = field(default_factory=_now_iso)
+    work_dir: str | None = None
+    export_dir: str | None = None
+    batch_export_dir: str | None = None
+    summary: dict[str, Any] | None = None
+    error_message: str | None = None
+    cancel_requested: bool = False
+    progress: dict[str, Any] = field(
+        default_factory=lambda: _progress("queued", "任务已创建，等待执行", 0)
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "request": {
+                "input_dir": self.request.input_dir,
+                "target_policy": self.request.target_policy,
+                "workflow": self.request.workflow,
+                "asr": self.request.asr,
+                "vad": self.request.vad,
+                "strategy_agent": self.request.strategy_agent,
+                "curator_agent": self.request.curator_agent,
+                "report_agent": self.request.report_agent,
+                "qwen_model_path": self.request.qwen_model_path,
+                "qwen_max_new_tokens": self.request.qwen_max_new_tokens,
+                "llm_only_issue_samples": self.request.llm_only_issue_samples,
+                "curator_confidence_threshold": self.request.curator_confidence_threshold,
+                "speaker_consistency_check": self.request.speaker_consistency_check,
+                "vad_min_duration_seconds": self.request.vad_min_duration_seconds,
+                "vad_merge_gap_seconds": self.request.vad_merge_gap_seconds,
+                "metadata_path": self.request.metadata_path,
+                "metadata_audio_column": self.request.metadata_audio_column,
+                "metadata_text_column": self.request.metadata_text_column,
+                "metadata_language_column": self.request.metadata_language_column,
+                "metadata_speaker_column": self.request.metadata_speaker_column,
+                "use_sidecar_text": self.request.use_sidecar_text,
+                "repair_chain": self.request.repair_chain,
+                "rag_mode": self.request.rag_mode,
+                "rag_documents": self.request.rag_documents,
+                "rag_index": self.request.rag_index,
+                "rag_rebuild": self.request.rag_rebuild,
+            },
+            "work_dir": self.work_dir,
+            "export_dir": self.export_dir,
+            "batch_export_dir": self.batch_export_dir,
+            "summary": self.summary,
+            "error_message": self.error_message,
+            "cancel_requested": self.cancel_requested,
+            "progress": self.progress,
+        }
+
+
+PipelineRunner = Callable[[RunRequest, Path, Path], Path]
+
+
+def _safe_upload_parts(raw_name: str) -> list[str]:
+    """校验浏览器提供的相对路径，阻止上传文件逃逸到临时目录之外。"""
+    normalized = str(raw_name or "").replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError("上传文件路径无效")
+    return parts
+
+
+class IssueOnlyAgentWrapper:
+    """只把带问题标签的样本交给 LLM，干净样本走 baseline。"""
+
+    def __init__(self, issue_agent, clean_fallback_agent) -> None:
+        self.issue_agent = issue_agent
+        self.clean_fallback_agent = clean_fallback_agent
+
+    def decide(self, result, strategy=None):
+        if getattr(result, "issue_tags", None):
+            return _call_decider(self.issue_agent, result, strategy)
+        return _call_decider(self.clean_fallback_agent, result, strategy)
+
+
+def _call_decider(agent, result, strategy):
+    """兼容只接收 AnalysisResult 的旧 Agent 实现。"""
+    if strategy is None:
+        return agent.decide(result)
+    parameters = inspect.signature(agent.decide).parameters.values()
+    supports_strategy = any(
+        parameter.name == "strategy"
+        or parameter.kind == inspect.Parameter.VAR_POSITIONAL
+        for parameter in parameters
+    )
+    if supports_strategy:
+        return agent.decide(result, strategy)
+    return agent.decide(result)
+
+
+class AudioDatasetJobManager:
+    """管理 Web UI 触发的本地音频数据集任务。"""
+
+    def __init__(
+        self,
+        runs_root: Path | str,
+        runner: PipelineRunner | None = None,
+        ):
+        self.runs_root = Path(runs_root)
+        self.runner = runner or _run_pipeline_for_request
+        self._jobs: dict[str, AudioDatasetJob] = {}
+        self._lock = threading.Lock()
+
+    def start_job(self, request: RunRequest) -> AudioDatasetJob:
+        job = self._create_job(request)
+        thread = threading.Thread(target=self._run_job, args=(job.job_id,), daemon=True)
+        thread.start()
+        return job
+
+    def stage_uploaded_directory(
+        self,
+        files: list[tuple[str, bytes]],
+    ) -> dict[str, str | int]:
+        """将浏览器目录选择器上传的文件落到隔离目录，返回可运行的本地路径。"""
+        if not files:
+            raise ValueError("没有收到可处理的文件")
+
+        upload_id = f"upload_{uuid.uuid4().hex[:12]}"
+        upload_root = self.runs_root / "_uploads" / upload_id
+        first_parts = _safe_upload_parts(files[0][0])
+        directory_name = first_parts[0] if len(first_parts) > 1 else "上传目录"
+        input_dir = upload_root / directory_name
+        input_dir.mkdir(parents=True, exist_ok=True)
+
+        for raw_name, content in files:
+            parts = _safe_upload_parts(raw_name)
+            relative_parts = parts[1:] if len(parts) > 1 else parts
+            destination = input_dir.joinpath(*relative_parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+
+        return {
+            "input_dir": str(input_dir.resolve()),
+            "directory_name": directory_name,
+            "file_count": len(files),
+        }
+
+    def run_sync(self, request: RunRequest) -> AudioDatasetJob:
+        job = self._create_job(request)
+        self._run_job(job.job_id)
+        return self.get_job(job.job_id)
+
+    def get_job(self, job_id: str) -> AudioDatasetJob:
+        with self._lock:
+            if job_id not in self._jobs:
+                raise KeyError(job_id)
+            return self._jobs[job_id]
+
+    def list_jobs(self) -> list[AudioDatasetJob]:
+        with self._lock:
+            return sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)
+
+    def cancel_job(self, job_id: str) -> AudioDatasetJob:
+        with self._lock:
+            if job_id not in self._jobs:
+                raise KeyError(job_id)
+            job = self._jobs[job_id]
+            job.cancel_requested = True
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.progress = _progress("cancelled", "任务已取消", 100)
+            elif job.status == "running":
+                job.progress = _progress(
+                    "cancelling",
+                    "已收到取消请求，正在等待当前阶段结束",
+                    job.progress.get("percent", 0),
+                )
+            job.updated_at = _now_iso()
+            return job
+
+    def _create_job(self, request: RunRequest) -> AudioDatasetJob:
+        input_dir = Path(request.input_dir)
+        if not input_dir.exists() or not input_dir.is_dir():
+            raise ValueError(f"音频目录不存在或不是文件夹：{input_dir}")
+        if request.asr == "none" and request.target_policy != "voice_clone":
+            raise ValueError("只有 voice_clone 流程允许关闭 ASR。")
+        if request.qwen_max_new_tokens <= 0:
+            raise ValueError("qwen_max_new_tokens 必须为正数")
+        if request.repair_chain not in {"single", "auto"}:
+            raise ValueError("不支持的修复链模式：只能选择 single 或 auto")
+        if request.rag_mode not in {"none", "local"}:
+            raise ValueError("不支持的 RAG 模式：只能选择 none 或 local")
+        job_id = f"audio_job_{uuid.uuid4().hex[:12]}"
+        job = AudioDatasetJob(job_id=job_id, request=request)
+        with self._lock:
+            self._jobs[job_id] = job
+        return job
+
+    def _run_job(self, job_id: str) -> None:
+        job = self.get_job(job_id)
+        if job.cancel_requested or job.status == "cancelled":
+            self._update_job(job_id, status="cancelled", progress=_progress("cancelled", "任务已取消", 100))
+            return
+
+        work_dir = self.runs_root / job_id / "work"
+        export_dir = self.runs_root / job_id / "exports"
+        self._update_job(
+            job_id,
+            status="running",
+            work_dir=str(work_dir),
+            export_dir=str(export_dir),
+            progress=_progress("pipeline", "正在运行音频清洗与 Agent 决策流程", 10),
+        )
+
+        try:
+            batch_export_dir = self.runner(job.request, work_dir, export_dir)
+            if self.get_job(job_id).cancel_requested:
+                self._update_job(
+                    job_id,
+                    status="cancelled",
+                    batch_export_dir=str(batch_export_dir),
+                    progress=_progress("cancelled", "任务已取消，已保留当前导出产物", 100),
+                )
+                return
+
+            self._update_job(job_id, progress=_progress("summary", "正在生成前端摘要", 92))
+            write_summary_file(batch_export_dir)
+            summary = build_summary_from_export_dir(batch_export_dir)
+            total_samples = int(summary.get("batch", {}).get("total_samples") or 0)
+            self._update_job(
+                job_id,
+                status="succeeded",
+                batch_export_dir=str(batch_export_dir),
+                summary=summary,
+                progress=_progress("succeeded", "处理完成", 100, total_samples, total_samples),
+            )
+        except Exception as exc:
+            self._update_job(
+                job_id,
+                status="failed",
+                error_message=str(exc),
+                progress=_progress("failed", "处理失败", 100),
+            )
+
+    def _update_job(self, job_id: str, **changes: Any) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            for key, value in changes.items():
+                setattr(job, key, value)
+            job.updated_at = _now_iso()
+
+
+def _run_pipeline_for_request(request: RunRequest, work_dir: Path, export_dir: Path) -> Path:
+    # 这里是 Web job 进入真正音频处理 pipeline 的桥梁。
+    work_dir.mkdir(parents=True, exist_ok=True)
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    # 集中实例化工具适配器，workflow 只接收抽象接口，便于后续替换工具实现。
+    ffmpeg_path = resolve_ffmpeg_path("ffmpeg")
+    run_config = request.to_run_config(ffmpeg_path)
+    metadata_config = request.to_metadata_config()
+    vad_analyzer = _build_vad_analyzer(request)
+    normalizer = FFmpegAudioNormalizer(ffmpeg_path=ffmpeg_path)
+    sample_materializer = FFmpegSampleMaterializer(ffmpeg_path=ffmpeg_path)
+    audio_metrics = WaveAudioMetricsAnalyzer()
+    acoustic_consistency = (
+        BatchAcousticConsistencyAnalyzer(audio_metrics)
+        if request.target_policy == "voice_clone" and request.speaker_consistency_check
+        else None
+    )
+    transcriber = _build_transcriber(request)
+    run_asr = request.asr != "none"
+    repair_executor = CompositeRepairExecutor(ffmpeg_executor=FFmpegRepairExecutor(ffmpeg_path=ffmpeg_path))
+    tool_registry = default_tool_registry()
+    agent_components = _build_agent_components(request, tool_registry)
+
+    if request.workflow == "repair":
+        batch = run_repair_enabled_pipeline(
+            input_dir=request.input_dir,
+            output_dir=work_dir,
+            export_dir=export_dir,
+            vad_analyzer=vad_analyzer,
+            transcriber=transcriber,
+            audio_metrics_analyzer=audio_metrics,
+            normalizer=normalizer,
+            sample_materializer=sample_materializer,
+            tool_registry=tool_registry,
+            repair_executor=repair_executor,
+            processing_strategy_agent=agent_components["processing_strategy_agent"],
+            curator_policy=agent_components["curator_policy"],
+            report_agent=agent_components["report_agent"],
+            target_policy=request.target_policy,
+            run_asr=run_asr,
+            run_config=run_config,
+            metadata_config=metadata_config,
+            acoustic_consistency_analyzer=acoustic_consistency,
+            repair_chain_mode=request.repair_chain,
+        )
+    else:
+        batch = run_batch_pipeline(
+            input_dir=request.input_dir,
+            output_dir=work_dir,
+            export_dir=export_dir,
+            vad_analyzer=vad_analyzer,
+            transcriber=transcriber,
+            audio_metrics_analyzer=audio_metrics,
+            normalizer=normalizer,
+            sample_materializer=sample_materializer,
+            tool_registry=tool_registry,
+            processing_strategy_agent=agent_components["processing_strategy_agent"],
+            curator_policy=agent_components["curator_policy"],
+            report_agent=agent_components["report_agent"],
+            target_policy=request.target_policy,
+            run_asr=run_asr,
+            run_config=run_config,
+            metadata_config=metadata_config,
+            acoustic_consistency_analyzer=acoustic_consistency,
+            repair_chain_mode=request.repair_chain,
+        )
+    if agent_components["knowledge_retriever"] is not None:
+        agent_components["knowledge_retriever"].write_audit_files(
+            Path(batch.export_paths["report"]).parent
+        )
+    batch = write_portfolio_artifacts(
+        batch,
+        build_local_portfolio_research(batch),
+    )
+    return Path(batch.export_paths["manifest"]).parent
+
+
+def _build_agent_components(request: RunRequest, tool_registry):
+    """按前端选项创建可选的本地 LLM Agent。"""
+    shared_qwen_client = None
+    knowledge_retriever = _build_knowledge_retriever(request)
+
+    def qwen_client():
+        nonlocal shared_qwen_client
+        if shared_qwen_client is None:
+            shared_qwen_client = TransformersQwenClient(
+                model_path=request.qwen_model_path,
+                max_new_tokens=request.qwen_max_new_tokens,
+            )
+        return shared_qwen_client
+
+    processing_strategy_agent = None
+    if request.strategy_agent == "qwen-local":
+        baseline_strategy = BaselineProcessingStrategyAgent(tool_registry, target_policy=request.target_policy)
+        processing_strategy_agent = LLMProcessingStrategyAgent(
+            qwen_client(),
+            tool_registry=tool_registry,
+            fallback_agent=baseline_strategy,
+            target_policy=request.target_policy,
+            knowledge_retriever=knowledge_retriever,
+        )
+        if request.llm_only_issue_samples:
+            processing_strategy_agent = IssueOnlyAgentWrapper(processing_strategy_agent, baseline_strategy)
+
+    curator_policy = None
+    if request.curator_agent == "qwen-local":
+        baseline_curator = BaselineCurationPolicy(target_policy=request.target_policy)
+        curator_policy = LLMCuratorAgent(
+            qwen_client(),
+            fallback_policy=baseline_curator,
+            target_policy=request.target_policy,
+        )
+        if request.llm_only_issue_samples:
+            curator_policy = IssueOnlyAgentWrapper(curator_policy, baseline_curator)
+
+    report_agent = None
+    base_report_agent = DatasetReportAgent(knowledge_retriever=knowledge_retriever)
+    if request.report_agent == "qwen-local":
+        report_agent = LLMDatasetReportAgent(
+            qwen_client(),
+            base_agent=base_report_agent,
+        )
+    elif knowledge_retriever is not None:
+        report_agent = base_report_agent
+
+    return {
+        "processing_strategy_agent": processing_strategy_agent,
+        "curator_policy": curator_policy,
+        "report_agent": report_agent,
+        "knowledge_retriever": knowledge_retriever,
+    }
+
+
+def _build_knowledge_retriever(request: RunRequest):
+    if request.rag_mode == "none":
+        return None
+    try:
+        retriever = LocalKnowledgeRetriever(request.rag_documents, request.rag_index)
+        if request.rag_rebuild:
+            retriever.rebuild()
+        return retriever
+    except Exception:
+        return None
+
+
+def _build_vad_analyzer(request: RunRequest):
+    if request.vad == "whole-file":
+        return WholeFileVADAnalyzer()
+    if request.vad == "wave-energy":
+        return WaveEnergyVADAnalyzer(
+            min_duration_seconds=request.vad_min_duration_seconds,
+            merge_gap_seconds=request.vad_merge_gap_seconds,
+        )
+    return FixedVADAnalyzer([SpeechSegment(0.0, 1.5)])
+
+
+def _build_transcriber(request: RunRequest):
+    if request.asr == "faster-whisper":
+        return FasterWhisperTranscriber(
+            model_size_or_path="local_tools/models/faster-whisper/small",
+            device="cpu",
+            compute_type="int8",
+        )
+    if request.asr == "fixed":
+        return FixedTranscriber(TranscriptResult(request.demo_transcript, request.demo_confidence))
+    return FixedTranscriber(TranscriptResult("", None))
+
+
+

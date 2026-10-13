@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "description": "音频数据集 Agent 本地工具和业务知识库",
+  "documents": [
+    "audio_tools/ffmpeg.md",
+    "audio_tools/silero_vad.md",
+    "audio_tools/faster_whisper.md",
+    "audio_tools/deepfilternet.md",
+    "dataset_practices/tts数据规范.md",
+    "dataset_practices/asr数据规范.md",
+    "dataset_practices/voice_clone数据规范.md"
+  ]
+}

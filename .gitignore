@@ -1,0 +1,30 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 前端依赖和本地配置
+frontend/node_modules/
+.env
+.env.*
+!.env.example
+
+# 本地运行产物
+local_tools/cache/
+local_tools/models/
+local_tools/downloads/
+local_tools/python_packages/
+local_tools/deepfilternet/*.exe
+datasets/
+*.log
+*.pid
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,10 @@
+# 可选模型能力。默认规则流程不需要安装这些依赖。
+numpy>=1.26,<3
+soundfile>=0.12
+silero-vad>=6.0
+faster-whisper>=1.2
+torch>=2.2
+torchaudio>=2.2
+transformers>=4.51
+accelerate>=1.0
+safetensors>=0.4
