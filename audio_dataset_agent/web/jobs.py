@@ -9,7 +9,7 @@ Web 层不直接做音频分析；它负责准备工具实例、记录任务状�
 import inspect
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -21,6 +21,7 @@ from audio_dataset_agent.analyzers.vad import (
     WholeFileVADAnalyzer,
 )
 from audio_dataset_agent.cli import resolve_ffmpeg_path
+from audio_dataset_agent.harness.runtime import HarnessRuntime
 from audio_dataset_agent.curation.agent import LLMCuratorAgent
 from audio_dataset_agent.curation.policy import BaselineCurationPolicy
 from audio_dataset_agent.curation.qwen_client import TransformersQwenClient
@@ -40,6 +41,7 @@ from audio_dataset_agent.tools.registry import default_tool_registry
 from audio_dataset_agent.transcription.faster_whisper_transcriber import FasterWhisperTranscriber
 from audio_dataset_agent.transcription.transcriber import FixedTranscriber, TranscriptResult
 from audio_dataset_agent.web.summary import build_summary_from_export_dir, write_summary_file
+from audio_dataset_agent.storage.sqlite import SQLiteRunStore
 
 
 WorkflowName = Literal["basic", "repair"]
@@ -103,6 +105,13 @@ class RunRequest:
     rag_documents: str = "knowledge_base/documents"
     rag_index: str = "local_tools/cache/rag/index.sqlite"
     rag_rebuild: bool = False
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RunRequest":
+        """从 SQLite 快照恢复请求，忽略未来版本新增的未知字段。"""
+        field_names = {item.name for item in fields(cls)}
+        values = {key: value for key, value in payload.items() if key in field_names}
+        return cls(**values)
 
     def to_run_config(self, ffmpeg_path: str) -> dict[str, Any]:
         """生成可写入批次产物的运行参数快照，不包含密钥。"""
@@ -266,14 +275,48 @@ class AudioDatasetJobManager:
         self,
         runs_root: Path | str,
         runner: PipelineRunner | None = None,
+        store: SQLiteRunStore | None = None,
         ):
         self.runs_root = Path(runs_root)
         self.runner = runner or _run_pipeline_for_request
         self._jobs: dict[str, AudioDatasetJob] = {}
         self._lock = threading.Lock()
+        self.store = store or SQLiteRunStore(self.runs_root / "harness.sqlite3")
+        self.harness = HarnessRuntime(self.store)
+        self._restore_persisted_jobs()
+
+    def _restore_persisted_jobs(self) -> None:
+        """恢复最近一次服务进程退出前已登记的 Run 元数据。"""
+        for snapshot in self.store.list_runs():
+            try:
+                request = RunRequest.from_dict(snapshot.get("request") or {})
+                job = AudioDatasetJob(
+                    job_id=snapshot["job_id"],
+                    request=request,
+                    status=snapshot["status"],
+                    created_at=snapshot["created_at"],
+                    updated_at=snapshot["updated_at"],
+                    work_dir=snapshot.get("work_dir"),
+                    export_dir=snapshot.get("export_dir"),
+                    batch_export_dir=snapshot.get("batch_export_dir"),
+                    summary=snapshot.get("summary"),
+                    error_message=snapshot.get("error_message"),
+                    cancel_requested=snapshot.get("cancel_requested", False),
+                    progress=snapshot.get("progress") or _progress("restored", "已恢复任务记录", 0),
+                )
+                # 服务重启时，无法安全恢复正在执行的 Python 线程，转为失败并留下原因。
+                if job.status in {"queued", "running"}:
+                    job.status = "failed"
+                    job.error_message = "服务重启时任务未完成，未自动重放音频处理。"
+                    job.progress = _progress("failed", job.error_message, 100)
+                self._jobs[job.job_id] = job
+                self.store.upsert_run(job.to_dict())
+            except (KeyError, TypeError, ValueError):
+                continue
 
     def start_job(self, request: RunRequest) -> AudioDatasetJob:
         job = self._create_job(request)
+        self.harness.create_run(job.job_id, job.to_dict()["request"])
         thread = threading.Thread(target=self._run_job, args=(job.job_id,), daemon=True)
         thread.start()
         return job
@@ -308,6 +351,7 @@ class AudioDatasetJobManager:
 
     def run_sync(self, request: RunRequest) -> AudioDatasetJob:
         job = self._create_job(request)
+        self.harness.create_run(job.job_id, job.to_dict()["request"])
         self._run_job(job.job_id)
         return self.get_job(job.job_id)
 
@@ -326,6 +370,7 @@ class AudioDatasetJobManager:
             if job_id not in self._jobs:
                 raise KeyError(job_id)
             job = self._jobs[job_id]
+            previous_status = job.status
             job.cancel_requested = True
             if job.status == "queued":
                 job.status = "cancelled"
@@ -337,7 +382,27 @@ class AudioDatasetJobManager:
                     job.progress.get("percent", 0),
                 )
             job.updated_at = _now_iso()
-            return job
+            snapshot = job.to_dict()
+            current_status = job.status
+            progress = job.progress
+        self.store.upsert_run(snapshot)
+        if current_status != previous_status:
+            self.harness.transition(
+                job_id,
+                previous=previous_status,
+                current=current_status,
+                stage=str(progress.get("current_stage", "cancelled")),
+                message=str(progress.get("stage_message", "任务已取消")),
+            )
+        else:
+            self.store.append_event(
+                job_id,
+                event_type="cancel_requested",
+                stage=str(progress.get("current_stage", "pipeline")),
+                status=current_status,
+                payload={"message": "已收到取消请求"},
+            )
+        return job
 
     def _create_job(self, request: RunRequest) -> AudioDatasetJob:
         input_dir = Path(request.input_dir)
@@ -355,6 +420,7 @@ class AudioDatasetJobManager:
         job = AudioDatasetJob(job_id=job_id, request=request)
         with self._lock:
             self._jobs[job_id] = job
+        self.store.upsert_run(job.to_dict())
         return job
 
     def _run_job(self, job_id: str) -> None:
@@ -371,6 +437,13 @@ class AudioDatasetJobManager:
             work_dir=str(work_dir),
             export_dir=str(export_dir),
             progress=_progress("pipeline", "正在运行音频清洗与 Agent 决策流程", 10),
+        )
+        self.harness.checkpoint(
+            job_id,
+            work_dir.parent / "checkpoint.json",
+            stage="pipeline",
+            status="running",
+            artifacts=[],
         )
 
         try:
@@ -395,6 +468,20 @@ class AudioDatasetJobManager:
                 summary=summary,
                 progress=_progress("succeeded", "处理完成", 100, total_samples, total_samples),
             )
+            self.harness.register_artifacts(
+                job_id,
+                [
+                    {"name": "manifest", "path": str(Path(batch_export_dir) / "manifest.jsonl"), "kind": "manifest"},
+                    {"name": "quality_report", "path": str(Path(batch_export_dir) / "dataset_quality_report.json"), "kind": "report"},
+                ],
+            )
+            self.harness.checkpoint(
+                job_id,
+                work_dir.parent / "checkpoint.json",
+                stage="export",
+                status="succeeded",
+                artifacts=self.store.list_artifacts(job_id),
+            )
         except Exception as exc:
             self._update_job(
                 job_id,
@@ -406,9 +493,21 @@ class AudioDatasetJobManager:
     def _update_job(self, job_id: str, **changes: Any) -> None:
         with self._lock:
             job = self._jobs[job_id]
+            previous_status = job.status
             for key, value in changes.items():
                 setattr(job, key, value)
             job.updated_at = _now_iso()
+            snapshot = job.to_dict()
+        self.store.upsert_run(snapshot)
+        if "status" in changes and changes["status"] != previous_status:
+            progress = changes.get("progress") or snapshot.get("progress") or {}
+            self.harness.transition(
+                job_id,
+                previous=previous_status,
+                current=changes["status"],
+                stage=str(progress.get("current_stage", "unknown")),
+                message=str(progress.get("stage_message", "状态更新")),
+            )
 
 
 def _run_pipeline_for_request(request: RunRequest, work_dir: Path, export_dir: Path) -> Path:

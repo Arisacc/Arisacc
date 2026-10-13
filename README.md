@@ -13,6 +13,7 @@
 - 可选地接入本地 Qwen、faster-whisper、Silero VAD 和 DeepFilterNet。
 - 对修复结果重新分析和评估，导出 manifest、报告、工具版本和 Agent Graph 追溯。
 - 提供 React 本地工作台，用于配置任务、查看质量概览、筛选样本和人工复核。
+- 使用 Harness Runtime 管理 Run 状态、SQLite 事件日志、检查点和导出产物索引。
 
 ## 处理流程
 
@@ -40,7 +41,7 @@ Agent 输出是受结构化数据模型和可用工具约束的；Agent 负责�
 | --- | --- | --- |
 | 目录扫描、规则 Agent、质量分析、报告导出 | 可用 | Python 3.11+ |
 | FFmpeg 格式标准化、片段处理 | 可用 | 安装 `imageio-ffmpeg`，首次运行时下载 FFmpeg wheel |
-| Web 工作台 | 可用 | 使用仓库自带的 `frontend/dist`；修改前端才需要 Node.js |
+| Web 工作台 | 可用 | FastAPI 使用仓库自带的 `frontend/dist`；修改前端才需要 Node.js |
 | faster-whisper ASR | 可选 | 安装 `requirements-optional.txt` 中相关依赖并准备模型 |
 | Silero VAD | 可选 | 安装 PyTorch、torchaudio、silero-vad |
 | Qwen 本地 Agent | 可选 | 安装 Transformers 依赖并自行准备兼容模型 |
@@ -62,7 +63,9 @@ cd <仓库目录>
 .\start_client.bat
 ```
 
-客户端会启动仅监听本机回环地址的后端，并打开 `http://127.0.0.1:8000/pipeline`。在网页中选择本地音频目录，选择 TTS、ASR 或声音克隆用途，按需调整参数后点击“开始处理”。默认关闭 ASR，默认 Agent 为规则基线。
+客户端会启动仅监听本机回环地址的 FastAPI Harness 后端，并打开 `http://127.0.0.1:8000/pipeline`。在网页中选择本地音频目录，选择 TTS、ASR 或声音克隆用途，按需调整参数后点击“开始处理”。默认关闭 ASR，默认 Agent 为规则基线。
+
+Harness API 还提供 `GET /audio-dataset/jobs/{job_id}/events` 和 `GET /audio-dataset/jobs/{job_id}/artifacts`，可查看一次 Run 的状态迁移、检查点和导出产物。SQLite 数据库默认位于 `local_tools/cache/audio_web_runs/harness.sqlite3`。
 
 停止后端：
 

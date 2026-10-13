@@ -49,7 +49,7 @@ if (!$backendReady) {
   $process = Start-Process `
     -FilePath $python `
     -ArgumentList @(
-      "-m", "audio_dataset_agent.web.local_server",
+      "-m", "audio_dataset_agent.web.fastapi_server",
       "--host", "127.0.0.1",
       "--port", "8000",
       "--frontend-dir", "frontend/dist"
