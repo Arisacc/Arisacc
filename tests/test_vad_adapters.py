@@ -1,19 +1,11 @@
 import unittest
-import importlib.util
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 
-HAS_SILERO_RUNTIME = all(
-    importlib.util.find_spec(module_name) is not None
-    for module_name in ("soundfile", "torch", "silero_vad")
-)
-
-
 class TestSileroVADAnalyzer(unittest.TestCase):
-    @unittest.skipUnless(HAS_SILERO_RUNTIME, "需要安装可选 Silero VAD 依赖")
     def test_default_model_loader_uses_onnx_backend_for_windows_path_compatibility(self):
         from audio_dataset_agent.analyzers.silero_vad import SileroVADAnalyzer
 
@@ -91,7 +83,6 @@ class TestSileroVADAnalyzer(unittest.TestCase):
         self.assertEqual(segments[0].start_time, 3.0)
         self.assertEqual(segments[0].end_time, 3.5)
 
-    @unittest.skipUnless(HAS_SILERO_RUNTIME, "需要安装可选 Silero VAD 依赖")
     def test_default_audio_reader_uses_soundfile_tensor_without_torchaudio(self):
         from audio_dataset_agent.analyzers.silero_vad import SileroVADAnalyzer
 
@@ -115,7 +106,6 @@ class TestSileroVADAnalyzer(unittest.TestCase):
         self.assertAlmostEqual(float(wav[0]), 0.5)
         self.assertAlmostEqual(float(wav[1]), 0.75)
 
-    @unittest.skipUnless(HAS_SILERO_RUNTIME, "需要安装可选 Silero VAD 依赖")
     def test_default_audio_reader_rejects_unexpected_sample_rate(self):
         from audio_dataset_agent.analyzers.silero_vad import SileroVADAnalyzer
 

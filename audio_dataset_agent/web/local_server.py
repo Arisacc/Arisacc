@@ -7,9 +7,12 @@ from __future__ import annotations
 """
 
 import argparse
+import csv
 import json
 import math
 import mimetypes
+import re
+import shutil
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -119,8 +122,8 @@ def apply_manual_review_override(job, payload: dict) -> dict:
     note = str(payload.get("note") or "").strip()
     if not sample_id:
         raise ValueError("sample_id 不能为空")
-    if decision not in {"keep", "reject", "repair", "review"}:
-        raise ValueError("decision 必须为 keep、reject、repair 或 review")
+    if decision not in {"keep", "reject"}:
+        raise ValueError("人工复核决策只能是 keep 或 reject")
 
     manifest_path = batch_dir / "manifest.jsonl"
     records = _read_jsonl(manifest_path)
@@ -139,12 +142,29 @@ def apply_manual_review_override(job, payload: dict) -> dict:
     if not isinstance(overrides, dict):
         overrides = {}
     overrides[sample_id] = override
-    overrides_path.write_text(json.dumps(overrides, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    archive_group = decision
+    archive_root = batch_dir / "manual_groups" / archive_group
+    archive_root.mkdir(parents=True, exist_ok=True)
+    archived_path: Path | None = None
+    archive_name: str | None = None
     corrected_records = []
     for record in records:
         if record.get("sample_id") == sample_id:
             record = dict(record)
+            source_value = record.get("source_audio_path") or record.get("audio_path") or record.get("final_audio_path")
+            source_path = Path(source_value) if source_value else None
+            if source_path and source_path.exists() and source_path.is_file():
+                safe_sample_id = re.sub(r"[^A-Za-z0-9._-]", "_", sample_id).strip("._") or "sample"
+                archive_name = f"{safe_sample_id}{source_path.suffix or '.wav'}"
+                # 同一样本重新改判时删除旧人工分组副本，保证它只属于当前分组。
+                previous_group_root = batch_dir / "manual_groups"
+                for old_group in ("keep", "reject", "repair", "review"):
+                    old_path = previous_group_root / old_group / archive_name
+                    if old_path.exists() and old_group != archive_group:
+                        old_path.unlink()
+                archived_path = archive_root / archive_name
+                shutil.copy2(source_path, archived_path)
             record["decision"] = decision
             record["decision_reason"] = f"manual override: {note}" if note else "manual override"
             if transcript:
@@ -154,8 +174,19 @@ def apply_manual_review_override(job, payload: dict) -> dict:
                 record["reference_text_source"] = "manual_review"
                 record["metadata_status"] = "matched"
             record["final_status"] = _manual_final_status(decision)
+            if archived_path is not None:
+                record["final_audio_path"] = str(archived_path)
+                record["audio_path"] = str(archived_path)
+                record["manual_archive_group"] = archive_group
+                record["manual_archive_path"] = str(archived_path)
             record["manual_review"] = override
         corrected_records.append(record)
+
+    override["archive_group"] = archive_group
+    override["archive_path"] = str(archived_path) if archived_path else None
+    override["msst"] = (job.summary or {}).get("run_config", {}).get("msst", {})
+    overrides[sample_id] = override
+    overrides_path.write_text(json.dumps(overrides, ensure_ascii=False, indent=2), encoding="utf-8")
 
     corrected_path = batch_dir / "manual_review_manifest.jsonl"
     corrected_path.write_text(
@@ -163,17 +194,20 @@ def apply_manual_review_override(job, payload: dict) -> dict:
         encoding="utf-8",
     )
 
-    # 复核覆盖不重新跑音频处理，但刷新 summary，便于前端立即看到人工覆盖文件路径。
+    # 复核覆盖不重新跑音频处理，但更新当前进程中的 summary，
+    # 让决策页立即显示新的状态和归档音频路径。
     write_summary_file(batch_dir)
+    _refresh_review_queue(batch_dir, corrected_records)
     if job.summary is not None:
         job.summary = build_summary_from_export_dir(batch_dir)
-        job.summary.setdefault("review_overrides", overrides)
-        job.updated_at = job.updated_at
+        job.summary["review_overrides"] = overrides
     return {
         "sample_id": sample_id,
         "decision": decision,
         "overrides_path": str(overrides_path),
         "manual_manifest_path": str(corrected_path),
+        "archive_group": archive_group,
+        "archive_path": str(archived_path) if archived_path else None,
     }
 
 
@@ -184,6 +218,29 @@ def _manual_final_status(decision: str) -> str:
         "repair": "manual_repair",
         "review": "manual_review",
     }[decision]
+
+
+def _refresh_review_queue(batch_dir: Path, records: list[dict]) -> None:
+    """人工去留改变后同步复核队列，避免已保留样本仍显示为待复核。"""
+    queue = []
+    for record in records:
+        if record.get("final_status") not in {"needs_review", "manual_review"}:
+            continue
+        queue.append({
+            "sample_id": record.get("sample_id"),
+            "recommended_action": record.get("recommended_action") or record.get("decision"),
+            "issue_tags": record.get("issue_tags") or [],
+            "confidence": record.get("confidence"),
+            "reason": record.get("decision_reason") or "",
+        })
+    (batch_dir / "review_queue.json").write_text(
+        json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    with (batch_dir / "review_queue.csv").open("w", encoding="utf-8-sig", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=["sample_id", "recommended_action", "issue_tags", "confidence", "reason"])
+        writer.writeheader()
+        for item in queue:
+            writer.writerow({**item, "issue_tags": ";".join(str(tag) for tag in item["issue_tags"])})
 
 
 def _read_json(path: Path, default):
@@ -364,6 +421,10 @@ class AudioDatasetRequestHandler(BaseHTTPRequestHandler):
                 if len(parts) == 4 and parts[3] == "review-overrides":
                     job = self.manager.get_job(parts[2])
                     result = apply_manual_review_override(job, self._read_json_body())
+                    self.manager.store.upsert_run(job.to_dict())
+                    self.manager.store.append_event(
+                        parts[2], "manual_review_applied", "review", "succeeded", result
+                    )
                     self._send_json(build_success_payload(result, "人工复核意见已保存"))
                     return
 

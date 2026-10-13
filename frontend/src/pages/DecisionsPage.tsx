@@ -4,6 +4,8 @@ import { StatusBadge } from '../components/StatusBadge'
 import { useAudioPlayer } from '../hooks/useAudioPlayer'
 import { AudioSample, decisionLabels, displayStrategy, formatNumber, sampleAudioUrl, usePipeline } from '../state/PipelineContext'
 
+const manualDecisionLabels = { keep: '保留', reject: '拒绝' } as const
+
 function MiniWave({ sampleId, playing, onToggle, disabled }: { sampleId: string; playing: boolean; onToggle: () => void; disabled: boolean }) {
   const bars = Array.from({ length: 12 }, (_, index) => ((sampleId.charCodeAt(index % Math.max(1, sampleId.length)) + index * 13) % 70) + 20)
   return <button className={`miniWaveButton ${playing ? 'playing' : ''}`} type="button" disabled={disabled} aria-label={playing ? '暂停音频' : '播放音频'} onClick={(event) => { event.stopPropagation(); onToggle() }}><span className="miniWave" aria-hidden="true">{bars.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</span>{playing ? <Pause size={13} /> : <Play size={13} />}</button>
@@ -11,7 +13,7 @@ function MiniWave({ sampleId, playing, onToggle, disabled }: { sampleId: string;
 
 function SampleDrawer({ sample, onClose }: { sample: AudioSample; onClose: () => void }) {
   const { job, saveReviewOverride } = usePipeline()
-  const [decision, setDecision] = useState(sample.curator_decision as 'keep' | 'reject' | 'repair' | 'review')
+  const [decision, setDecision] = useState<'keep' | 'reject'>(sample.curator_decision === 'keep' ? 'keep' : 'reject')
   const [transcript, setTranscript] = useState(sample.transcript || '')
   const [note, setNote] = useState('')
   const [saving, setSaving] = useState(false)
@@ -25,8 +27,8 @@ function SampleDrawer({ sample, onClose }: { sample: AudioSample; onClose: () =>
     <p className="sectionKicker">SAMPLE REVIEW</p>
     <h2>{sample.sample_id}</h2>
     {audioUrl ? <div className="audioPreview"><span><AudioLines size={14} /> 最终音频</span><audio controls src={audioUrl} preload="metadata" /></div> : <div className="emptyInline"><FileAudio size={16} />当前样本暂无可试听的最终音频</div>}
-    <div className="reviewBox"><h3>人工复核</h3><label><span>覆盖决策</span><select value={decision} onChange={(event) => setDecision(event.target.value as typeof decision)}>{Object.entries(decisionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label><span>修订文本</span><textarea value={transcript} onChange={(event) => setTranscript(event.target.value)} rows={3} /></label><label><span>复核备注</span><textarea value={note} onChange={(event) => setNote(event.target.value)} rows={2} /></label><button type="button" onClick={save} disabled={!job || job.status !== 'succeeded' || saving}>{saving ? '保存中' : '保存复核意见'}</button></div>
-    <dl className="sampleExplain"><dt>审核决策</dt><dd><StatusBadge value={sample.curator_decision} /></dd><dt>最终状态</dt><dd><StatusBadge value={sample.final_status} /></dd><dt>处理策略</dt><dd>{displayStrategy(sample.strategy)}</dd><dt>决策理由</dt><dd>{sample.curator_reason || sample.strategy_reason || '未提供'}</dd><dt>文本来源</dt><dd>{sample.transcript_source}</dd><dt>ASR 置信度</dt><dd>{sample.asr_confidence ?? '未计算'}</dd><dt>SNR</dt><dd>{sample.snr == null ? '未计算' : `${sample.snr.toFixed(1)} dB`}</dd><dt>质量分</dt><dd>{sample.quality_score == null ? '未计算' : sample.quality_score.toFixed(4)}</dd><dt>参考文本</dt><dd>{sample.reference_text || '未提供'}</dd><dt>ASR 候选文本</dt><dd>{sample.transcript || '未生成'}</dd><dt>修复链</dt><dd>{sample.repair_chain?.length ? sample.repair_chain.map((step) => `${step.step_index}. ${step.operation}`).join(' → ') : '未生成'}</dd></dl>
+    <div className="reviewBox"><h3>人工复核</h3><label><span>覆盖决策</span><select value={decision} onChange={(event) => setDecision(event.target.value as typeof decision)}>{Object.entries(manualDecisionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label><span>修订文本</span><textarea value={transcript} onChange={(event) => setTranscript(event.target.value)} rows={3} /></label><label><span>复核备注</span><textarea value={note} onChange={(event) => setNote(event.target.value)} rows={2} /></label><button type="button" onClick={save} disabled={!job || job.status !== 'succeeded' || saving}>{saving ? '保存中' : '保存复核意见'}</button></div>
+    <dl className="sampleExplain"><dt>审核决策</dt><dd><StatusBadge value={sample.curator_decision} /></dd><dt>最终状态</dt><dd><StatusBadge value={sample.final_status} /></dd><dt>处理策略</dt><dd>{displayStrategy(sample.strategy)}</dd><dt>决策理由</dt><dd>{sample.curator_reason || sample.strategy_reason || '未提供'}</dd><dt>文本状态</dt><dd>{sample.transcript_source === 'none' ? '未启用文本转写' : sample.transcript_source}</dd><dt>SNR</dt><dd>{sample.snr == null ? '未计算' : `${sample.snr.toFixed(1)} dB`}</dd><dt>质量分</dt><dd>{sample.quality_score == null ? '未计算' : sample.quality_score.toFixed(4)}</dd><dt>参考文本</dt><dd>{sample.reference_text || '未提供'}</dd><dt>文本内容</dt><dd>{sample.transcript || '未生成'}</dd><dt>修复链</dt><dd>{sample.repair_chain?.length ? sample.repair_chain.map((step) => `${step.step_index}. ${step.operation}`).join(' → ') : '未生成'}</dd></dl>
   </aside>
 }
 

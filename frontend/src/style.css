@@ -112,7 +112,7 @@ option, optgroup { color: var(--text); background: var(--surface-solid); }
 .navSegmented a.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border-glass)); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 15%, transparent), inset 0 -2px 0 var(--accent); }
 .navActions { gap: 8px; margin-left: 8px; }
 .navStatus { gap: 7px; color: var(--text-dim); font-size: 11px; white-space: nowrap; }
-.runButton, .primaryAction { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--accent); border-radius: 9px; color: #031014; background: var(--accent); box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 22%, transparent); font-size: 12px; font-weight: 700; }
+.runButton, .primaryAction { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 0 22px; border: 1px solid var(--accent); border-radius: 10px; color: #031014; background: var(--accent); box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 25%, transparent); font-size: 14px; font-weight: 750; }
 .runButton:hover:not(:disabled), .primaryAction:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 28%, transparent); }
 .iconButton { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--border-glass); border-radius: 10px; color: var(--text-dim); background: var(--surface); }
 .iconButton:hover:not(:disabled) { transform: translateY(-2px); color: var(--text); border-color: var(--border-strong); box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -181,9 +181,9 @@ option, optgroup { color: var(--text); background: var(--surface-solid); }
 .pipelineLine { fill: none; stroke: var(--border-glass); stroke-width: 1.5; stroke-dasharray: 4 5; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .pipelineConnector.completed .pipelineLine { stroke: var(--status-keep); stroke-dasharray: none; }
 .pipelineConnector.current .pipelineLine { stroke: var(--accent-2); animation: energyDash .8s linear infinite; }
-.overviewGrid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); gap: 16px; }
+.overviewGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .funnelPanel, .agentPanel, .toolsPanel { padding: 20px; }
-.funnelOverview { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin-top: 22px; }
+.funnelOverview { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; width: 100%; margin-top: 22px; }
 .funnelStep { position: relative; min-height: 116px; display: grid; align-content: end; gap: 5px; padding: 12px; border-left: 1px solid var(--border-glass); }
 .funnelStep:first-child { border-left: 0; }
 .funnelIndex { color: var(--accent); font: 10px var(--font-mono); }
@@ -300,14 +300,15 @@ tbody tr:last-child td { border-bottom: 0; }
 .reportNote { display: flex; align-items: center; gap: 7px; color: var(--text-dim); font-size: 12px; }
 
 .settingsSection { padding: 20px; }
-.profileCards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 18px; }
+.profileCards { display: grid; grid-template-columns: minmax(280px, 420px); gap: 10px; margin-top: 18px; }
 .profileCard { display: grid; gap: 7px; min-width: 0; padding: 16px; border: 1px solid var(--border-glass); border-radius: var(--radius-md); color: var(--text-dim); background: var(--surface-muted); text-align: left; }
 .profileCard:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 15%, transparent); }
 .profileCard.selected { border-color: var(--accent); color: var(--text); background: var(--accent-soft); box-shadow: 0 0 22px color-mix(in srgb, var(--accent) 13%, transparent); }
 .profileIcon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
 .profileCard strong { font-size: 13px; }
 .profileCard small { color: var(--text-dim); font-size: 11px; line-height: 1.5; }
-.settingsGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.settingsGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+.settingsGrid > .settingsSection:last-child { grid-column: 1 / -1; }
 .rangeField { display: grid; gap: 9px; margin-top: 18px; }
 .rangeField > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text); font-size: 12px; }
 .rangeField output { color: var(--accent); font: 11px var(--font-mono); }
@@ -328,8 +329,19 @@ tbody tr:last-child td { border-bottom: 0; }
 .directoryMessage { margin: 0 0 14px; color: var(--text-faint); font-size: 10px; line-height: 1.4; }
 .checkField { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--text-dim); font-size: 12px; }
 .checkField input { width: 17px; height: 17px; accent-color: var(--accent); }
-.settingsActions { justify-content: space-between; gap: 14px; color: var(--text-dim); font-size: 12px; }
+.settingsActions { justify-content: space-between; gap: 18px; margin-top: 18px; color: var(--text-dim); font-size: 12px; }
 .settingsActions > span { display: inline-flex; align-items: center; gap: 7px; }
+.runRuntimeMeta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 12px 0 4px; color: var(--text-dim); font: 12px/1.4 var(--font-mono); }
+.runtimeDetails { padding: 20px; }
+.runtimeDetails > summary { cursor: pointer; list-style: none; }
+.runtimeDetails > summary::-webkit-details-marker { display: none; }
+.runtimeDetailGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 16px; }
+.runtimeDetailGrid > section { border-top: 1px solid var(--border); padding-top: 12px; }
+.runtimeRow { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(100px, .7fr) minmax(180px, 1.5fr); gap: 12px; padding: 10px 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); font-size: 12px; }
+.runtimeRow span, .runtimeRow small { color: var(--text-dim); }
+.reportButtons .primaryDownload { border-color: var(--accent); color: #031014; background: var(--accent); box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 22%, transparent); font-weight: 700; }
+.reportButtons .primaryDownload:hover { color: #031014; box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 30%, transparent); }
+@media (max-width: 760px) { .runtimeDetailGrid { grid-template-columns: 1fr; } .runtimeRow { grid-template-columns: 1fr; gap: 3px; } }
 
 [data-reveal] { opacity: 1; transform: translateY(0); }
 .reveal-pending { opacity: 0; transform: translateY(8px); }
@@ -373,6 +385,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .funnelStep:nth-child(odd) { border-left: 0; }
   .funnelArrow { display: none; }
   .profileCards, .settingsGrid { grid-template-columns: 1fr; }
+  .settingsGrid > .settingsSection:last-child { grid-column: auto; }
   .filterRow { grid-template-columns: 1fr; }
   .tableWrap { margin-inline: -4px; }
   .drawer { width: 100%; border-radius: 16px 16px 0 0; inset: auto 0 0; max-height: 90vh; }
@@ -395,7 +408,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .funnelStep, .funnelStep:first-child, .funnelStep:nth-child(odd) { border-left: 0; border-top: 1px solid var(--border-glass); }
   .funnelStep:first-child { border-top: 0; }
   .settingsActions { align-items: flex-start; flex-direction: column; }
-  .settingsActions .primaryAction { width: 100%; }
+  .settingsActions .primaryAction { width: 100%; min-height: 48px; }
   .sampleExplain { grid-template-columns: 1fr; gap: 3px; }
   .sampleExplain dd { margin-bottom: 7px; }
   .pagination { justify-content: space-between; flex-wrap: wrap; }

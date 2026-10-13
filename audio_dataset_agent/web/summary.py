@@ -11,7 +11,12 @@ def build_summary_from_export_dir(export_dir: Path | str) -> dict[str, Any]:
     """从单个批次导出目录生成前端可消费的摘要 JSON。"""
     root = Path(export_dir)
     quality = _read_json(root / "dataset_quality_report.json", default={})
-    manifest = _read_jsonl(root / "manifest.jsonl")
+    # 人工复核产生的 manifest 是当前批次的最新事实源；没有人工覆盖时才使用原始 manifest。
+    manifest_path = root / "manual_review_manifest.jsonl"
+    has_manual_manifest = manifest_path.exists()
+    if not has_manual_manifest:
+        manifest_path = root / "manifest.jsonl"
+    manifest = _read_jsonl(manifest_path)
     strategies = _read_json(
         root / "state" / "processing_strategies.json",
         default=[],
@@ -25,6 +30,7 @@ def build_summary_from_export_dir(export_dir: Path | str) -> dict[str, Any]:
     )
     portfolio_research = _read_json(root / "portfolio_research.json", default={})
     rag_retrievals = _read_jsonl(root / "state" / "rag_retrievals.jsonl")
+    run_config = _read_json(root / "run_config.json", default={})
 
     strategy_by_sample = {
         item.get("sample_id"): item
@@ -67,6 +73,8 @@ def build_summary_from_export_dir(export_dir: Path | str) -> dict[str, Any]:
                 "strategy_consistency": curator.get("strategy_consistency") or "not_applicable",
                 "final_status": record.get("final_status") or "unknown",
                 "final_audio_path": record.get("final_audio_path"),
+                "manual_archive_group": record.get("manual_archive_group"),
+                "manual_archive_path": record.get("manual_archive_path"),
                 "source_audio_path": record.get("source_audio_path"),
                 "work_audio_path": record.get("work_audio_path"),
                 "sample_audio_path": record.get("sample_audio_path"),
@@ -82,6 +90,11 @@ def build_summary_from_export_dir(export_dir: Path | str) -> dict[str, Any]:
     usable_samples = int(quality.get("usable_samples") or _count_status(samples, "selected"))
     review_samples = int(quality.get("review_samples") or _count_exact(samples, "needs_review"))
     rejected_samples = int(quality.get("rejected_samples") or _count_exact(samples, "excluded"))
+    if has_manual_manifest:
+        total_samples = len(samples)
+        usable_samples = sum(sample.get("final_status") in {"selected", "manual_keep"} for sample in samples)
+        review_samples = sum(sample.get("final_status") in {"needs_review", "manual_review"} for sample in samples)
+        rejected_samples = sum(sample.get("final_status") in {"excluded", "manual_reject"} for sample in samples)
 
     target_policy = quality.get("target_policy") or "voice_clone"
     repair_preset = get_repair_preset(target_policy)
@@ -115,6 +128,7 @@ def build_summary_from_export_dir(export_dir: Path | str) -> dict[str, Any]:
             "retrieval_count": len(rag_retrievals),
             "references": quality.get("knowledge_references", []),
         },
+        "run_config": run_config,
         "repair_preset": {
             "target_lufs": repair_preset.target_lufs,
             "silence_threshold_dbfs": repair_preset.silence_threshold_dbfs,

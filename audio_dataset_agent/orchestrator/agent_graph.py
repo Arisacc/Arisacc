@@ -25,6 +25,23 @@ class AgentGraphNodeTrace:
 class AgentGraphRecorder:
     graph_name: str = "音频数据集 Agent 工作流"
     nodes: list[AgentGraphNodeTrace] = field(default_factory=list)
+    progress_callback: Callable[[dict[str, Any]], None] | None = None
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "AgentGraphRecorder":
+        graph = cls(graph_name=(payload or {}).get("graph_name", "音频数据集 Agent 工作流"))
+        for item in (payload or {}).get("nodes", []):
+            if not isinstance(item, dict):
+                continue
+            graph.nodes.append(AgentGraphNodeTrace(
+                node_name=item["node_name"], agent_name=item["agent_name"],
+                input_summary=dict(item.get("input_summary") or {}),
+                output_summary=dict(item.get("output_summary") or {}),
+                duration_ms=float(item.get("duration_ms", 0)),
+                uses_agent=bool(item.get("uses_agent", False)), uses_tool=bool(item.get("uses_tool", False)),
+                notes=item.get("notes", ""),
+            ))
+        return graph
 
     def run_node(
         self,
@@ -37,6 +54,8 @@ class AgentGraphRecorder:
         notes: str = "",
     ) -> Batch:
         started = time.perf_counter()
+        if self.progress_callback:
+            self.progress_callback({"event": "stage_started", "stage": node_name, "agent": agent_name, "message": f"开始{agent_name}", "percent": 0})
         output = runner(batch)
         duration_ms = (time.perf_counter() - started) * 1000
         self.nodes.append(
@@ -51,6 +70,8 @@ class AgentGraphRecorder:
                 notes=notes,
             )
         )
+        if self.progress_callback:
+            self.progress_callback({"event": "stage_completed", "stage": node_name, "agent": agent_name, "message": f"完成{agent_name}", "percent": 100, "duration_ms": round(duration_ms, 3)})
         return output
 
     def to_dict(self) -> dict[str, Any]:

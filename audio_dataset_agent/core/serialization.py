@@ -1,19 +1,109 @@
 # 序列化工具：把核心对象稳定写入 JSON 状态文件。
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from audio_dataset_agent.core.models import (
     AnalysisResult,
     Batch,
+    BatchPhase,
     CandidateSample,
+    CandidateSampleStatus,
     CuratorDecision,
+    DecisionType,
     FinalSelection,
     ProcessingStrategy,
     RawAsset,
+    RawAssetStatus,
     RepairEvaluation,
     RepairExecution,
     RepairPlan,
     RepairChain,
 )
+
+
+def batch_from_dict(payload: dict[str, Any]) -> Batch:
+    """从 Harness checkpoint 恢复核心 Batch，不重新扫描已处理过的原始资产。"""
+    assets = [
+        RawAsset(
+            asset_id=item["asset_id"], batch_id=item["batch_id"],
+            source_path=Path(item["source_path"]), file_name=item["file_name"],
+            file_size=item["file_size"], extension=item["extension"],
+            work_path=Path(item["work_path"]) if item.get("work_path") else None,
+            status=RawAssetStatus(item.get("status", "imported")),
+            reference_text=item.get("reference_text"), reference_text_source=item.get("reference_text_source"),
+            language=item.get("language"), speaker_id=item.get("speaker_id"),
+            metadata_status=item.get("metadata_status", "missing"),
+            metadata_warnings=list(item.get("metadata_warnings") or []),
+        ) for item in payload.get("raw_assets", [])
+    ]
+    samples = [
+        CandidateSample(
+            sample_id=item["sample_id"], batch_id=item["batch_id"], asset_id=item["asset_id"],
+            source_path=Path(item["source_path"]), start_time=item["start_time"], end_time=item["end_time"],
+            duration=item["duration"], sample_path=Path(item["sample_path"]) if item.get("sample_path") else None,
+            transcript=item.get("transcript"), transcript_source=item.get("transcript_source"),
+            asr_confidence=item.get("asr_confidence"), status=CandidateSampleStatus(item.get("status", "created")),
+            reference_text=item.get("reference_text"), reference_text_source=item.get("reference_text_source"),
+            language=item.get("language"), speaker_id=item.get("speaker_id"),
+            metadata_status=item.get("metadata_status", "missing"),
+        ) for item in payload.get("candidate_samples", [])
+    ]
+    analyses = [AnalysisResult(
+        sample_id=item["sample_id"], duration=item["duration"], transcript_length=item["transcript_length"],
+        asr_confidence=item.get("asr_confidence"), issue_tags=list(item.get("issue_tags") or []),
+        evidence=dict(item.get("evidence") or {}),
+    ) for item in payload.get("analysis_results", [])]
+    strategies = [ProcessingStrategy(
+        sample_id=item["sample_id"], action=item["action"], recommended_operation=item["recommended_operation"],
+        selected_tool_ids=list(item.get("selected_tool_ids") or []), reason=item.get("reason", ""),
+        confidence=item.get("confidence", 0.0), agent_name=item.get("agent_name", "baseline_processing_strategy"),
+    ) for item in payload.get("processing_strategies", [])]
+    decisions = [CuratorDecision(
+        sample_id=item["sample_id"], decision=DecisionType(item["decision"]), reason=item["reason"],
+        confidence=item["confidence"], recommended_action=item["recommended_action"],
+        policy_name=item.get("policy_name", "baseline"), strategy_consistency=item.get("strategy_consistency", "not_applicable"),
+    ) for item in payload.get("curator_decisions", [])]
+    plans = [RepairPlan(
+        sample_id=item["sample_id"], operation=item["operation"], parameters=dict(item.get("parameters") or []),
+        reason=item.get("reason", ""), status=item.get("status", "planned"), chain_id=item.get("chain_id"),
+        step_index=item.get("step_index", 1),
+    ) for item in payload.get("repair_plans", [])]
+    chains = [RepairChain(
+        chain_id=item["chain_id"], sample_id=item["sample_id"],
+        plans=[RepairPlan(
+            sample_id=plan["sample_id"], operation=plan["operation"], parameters=dict(plan.get("parameters") or {}),
+            reason=plan.get("reason", ""), status=plan.get("status", "planned"), chain_id=plan.get("chain_id"),
+            step_index=plan.get("step_index", 1),
+        ) for plan in item.get("plans", [])],
+        max_steps=item.get("max_steps", 3), status=item.get("status", "planned"),
+    ) for item in payload.get("repair_chains", [])]
+    executions = [RepairExecution(
+        sample_id=item["sample_id"], operation=item["operation"], input_path=Path(item["input_path"]),
+        output_path=Path(item["output_path"]), status=item["status"], error_message=item.get("error_message"),
+        chain_id=item.get("chain_id"), step_index=item.get("step_index", 1),
+    ) for item in payload.get("repair_executions", [])]
+    evaluations = [RepairEvaluation(
+        sample_id=item["sample_id"], operation=item["operation"], before_metrics=dict(item.get("before_metrics") or {}),
+        after_metrics=dict(item.get("after_metrics") or {}), improved=item["improved"],
+        recommendation=item["recommendation"], reason=item.get("reason", ""), chain_id=item.get("chain_id"),
+        step_index=item.get("step_index", 1),
+    ) for item in payload.get("repair_evaluations", [])]
+    selections = [FinalSelection(
+        sample_id=item["sample_id"], status=item["status"],
+        selected_audio_path=Path(item["selected_audio_path"]) if item.get("selected_audio_path") else None,
+        reason=item["reason"],
+    ) for item in payload.get("final_selections", [])]
+    return Batch(
+        batch_id=payload["batch_id"], input_dir=Path(payload["input_dir"]), output_dir=Path(payload["output_dir"]),
+        target_policy=payload["target_policy"], run_config=dict(payload.get("run_config") or {}),
+        metadata_summary=dict(payload.get("metadata_summary") or {}), phase=BatchPhase(payload.get("phase", "created")),
+        created_at=datetime.fromisoformat(payload["created_at"]), updated_at=datetime.fromisoformat(payload["updated_at"]),
+        raw_assets=assets, candidate_samples=samples, analysis_results=analyses,
+        processing_strategies=strategies, curator_decisions=decisions, repair_plans=plans,
+        repair_chains=chains, repair_executions=executions, repair_evaluations=evaluations,
+        final_selections=selections, export_paths=dict(payload.get("export_paths") or {}),
+    )
 
 
 def raw_asset_to_dict(asset: RawAsset) -> dict[str, Any]:

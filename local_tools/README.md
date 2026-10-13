@@ -1,10 +1,10 @@
 # 本地工具与模型说明
 
-此目录保存音频数据集 Agent 的工具说明和可选外部工具。GitHub 轻量版不包含模型权重、虚拟环境和运行缓存；代码通过适配器调用第三方工具，不把第三方命令混入 Agent 决策逻辑。
+此目录保存音频数据集 Agent 的本地运行环境和外部工具。发布版不包含模型权重和运行缓存；代码通过适配器调用第三方工具，不直接把第三方命令混入 Agent 决策逻辑。
 
 ## 目录约定
 
-- `.venv/`：项目根目录下的 Python 运行环境，由 `setup_windows.bat` 创建，不提交 Git。
+- `venv/`：项目专用 Python 运行环境。
 - `models/`：可选模型目录，发布版默认不提供，需要模型推理时手动放入。
 - `deepfilternet/`：可选的 DeepFilterNet CLI。
 - `ffmpeg/`：手工放置的 FFmpeg 发行版；当前优先使用 `imageio-ffmpeg` 提供的可执行文件。
@@ -16,10 +16,10 @@
 项目命令统一使用：
 
 ```powershell
-.\.venv\Scripts\python.exe
+.\local_tools\venv\python.exe
 ```
 
-轻量默认依赖只有 `imageio-ffmpeg`。Qwen、Silero VAD、faster-whisper 等重型能力按需安装，不属于默认运行前置条件。
+已验证的核心依赖包括：`torch`、`torchaudio`、`numpy`、`soundfile`、`silero-vad`、`faster-whisper`、`imageio-ffmpeg`、`transformers`、`accelerate` 和 `safetensors`。
 
 ## 已接入工具
 
@@ -27,6 +27,11 @@
 
 - 用途：格式标准化、候选片段裁剪、响度标准化、静音裁剪和轻量降噪。
 - 当前来源：`imageio-ffmpeg`。
+- 当前可执行文件通常位于：
+
+```text
+E:\Fin\3\项目源码\local_tools\venv\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe
+```
 
 代码会先尝试系统 `ffmpeg`，找不到时自动回退到该本地可执行文件。
 
@@ -37,7 +42,7 @@
 - 验证导入：
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from silero_vad import load_silero_vad, read_audio, get_speech_timestamps; print('silero import ok')"
+.\local_tools\venv\python.exe -c "from silero_vad import load_silero_vad, read_audio, get_speech_timestamps; print('silero import ok')"
 ```
 
 ### faster-whisper
@@ -47,7 +52,7 @@
 - 发布版未包含 faster-whisper 模型权重；运行 ASR 前需要自行放入模型目录。
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from faster_whisper import WhisperModel; print('faster-whisper import ok')"
+.\local_tools\venv\python.exe -c "from faster_whisper import WhisperModel; print('faster-whisper import ok')"
 ```
 
 ### DeepFilterNet
@@ -67,7 +72,7 @@
 ### 本地 Qwen
 
 - 用途：为 Strategy Agent、Curator Agent 和 Report Agent 提供可选 LLM 推理。
-- 前端默认模型路径：`local_tools\models\qwen\Qwen3-4B-Instruct-2507`；模型目录不会随 GitHub 轻量版提交。
+- 前端默认模型路径：`local_tools\models\qwen\Qwen3-4B-Instruct-2507`。
 - 启用后仍受数据用途画像、工具注册表、结构化输出校验和规则 fallback 约束。
 
 ## 工具接入规范

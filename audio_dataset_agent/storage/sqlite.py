@@ -71,6 +71,20 @@ class SQLiteRunStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_events_job_id
                     ON run_events(job_id, event_id);
+                CREATE TABLE IF NOT EXISTS run_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_tasks_claim
+                    ON run_tasks(status, lease_expires_at, created_at);
                 CREATE TABLE IF NOT EXISTS run_artifacts (
                     artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL,
@@ -83,6 +97,170 @@ class SQLiteRunStore:
                     ON run_artifacts(job_id, artifact_id);
                 """
             )
+
+    def create_task(self, job_id: str, stage: str, payload: dict[str, Any]) -> str:
+        task_id = f"task_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+        now = _now_iso()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO run_tasks (
+                    task_id, job_id, stage, status, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'queued', ?, ?, ?)
+                """,
+                (task_id, job_id, stage, json.dumps(payload, ensure_ascii=False), now, now),
+            )
+        return task_id
+
+    def claim_task(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc)
+        lease_expires = now.timestamp() + lease_seconds
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM run_tasks
+                WHERE status = 'queued'
+                   OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                ORDER BY created_at
+                LIMIT 1
+                """,
+                (now.isoformat(),),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE run_tasks
+                SET status='running', attempts=attempts+1, lease_owner=?,
+                    lease_expires_at=?, updated_at=?
+                WHERE task_id=?
+                """,
+                (
+                    worker_id,
+                    datetime.fromtimestamp(lease_expires, timezone.utc).isoformat(),
+                    now.isoformat(),
+                    row["task_id"],
+                ),
+            )
+            return {
+                "task_id": row["task_id"],
+                "job_id": row["job_id"],
+                "stage": row["stage"],
+                "payload": json.loads(row["payload_json"]),
+                "attempts": row["attempts"] + 1,
+                "lease_owner": worker_id,
+            }
+
+    def expire_task_lease(self, task_id: str) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "UPDATE run_tasks SET lease_expires_at=?, updated_at=? WHERE task_id=?",
+                (datetime.fromtimestamp(0, timezone.utc).isoformat(), _now_iso(), task_id),
+            )
+
+    def complete_task(self, task_id: str, worker_id: str | None = None) -> bool:
+        with self._lock, self._connection() as connection:
+            where = "task_id=?"
+            values: list[Any] = [task_id]
+            if worker_id is not None:
+                where += " AND status='running' AND lease_owner=?"
+                values.append(worker_id)
+            cursor = connection.execute(
+                "UPDATE run_tasks SET status='succeeded', lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE " + where,
+                [_now_iso(), *values],
+            )
+            return cursor.rowcount == 1
+
+    def renew_task_lease(self, task_id: str, worker_id: str, lease_seconds: int = 60) -> bool:
+        """Worker 继续执行长任务时延长租约，避免被其他 Worker 抢占。"""
+        expires_at = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + lease_seconds,
+            timezone.utc,
+        ).isoformat()
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE run_tasks
+                SET lease_expires_at=?, updated_at=?
+                WHERE task_id=? AND status='running' AND lease_owner=?
+                """,
+                (expires_at, _now_iso(), task_id, worker_id),
+            )
+            return cursor.rowcount == 1
+
+    def fail_task(
+        self,
+        task_id: str,
+        error: str,
+        retry: bool = True,
+        max_attempts: int = 3,
+        worker_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """记录任务失败；未超过重试次数时回到 queued，否则进入 failed。"""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT attempts, lease_owner, status FROM run_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if worker_id is not None and (row["status"] != "running" or row["lease_owner"] != worker_id):
+                return None
+            next_status = "queued" if retry and row["attempts"] < max_attempts else "failed"
+            connection.execute(
+                """
+                UPDATE run_tasks
+                SET status=?, lease_owner=NULL, lease_expires_at=NULL,
+                    payload_json=json_set(payload_json, '$.last_error', ?), updated_at=?
+                WHERE task_id=?
+                """,
+                (next_status, error, _now_iso(), task_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM run_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+        return self._task_row_to_dict(updated) if updated else None
+
+    def get_task_for_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_tasks WHERE job_id=? ORDER BY created_at DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        return self._task_row_to_dict(row) if row else None
+
+    def _task_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "task_id": row["task_id"],
+            "job_id": row["job_id"],
+            "stage": row["stage"],
+            "status": row["status"],
+            "payload": json.loads(row["payload_json"]),
+            "attempts": row["attempts"],
+            "lease_owner": row["lease_owner"],
+            "lease_expires_at": row["lease_expires_at"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def list_events_after(self, job_id: str, event_id: int = 0) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM run_events WHERE job_id=? AND event_id>? ORDER BY event_id",
+                (job_id, event_id),
+            ).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "job_id": row["job_id"],
+                "event_type": row["event_type"],
+                "stage": row["stage"],
+                "status": row["status"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def upsert_run(self, snapshot: dict[str, Any]) -> None:
         now = snapshot.get("updated_at") or _now_iso()

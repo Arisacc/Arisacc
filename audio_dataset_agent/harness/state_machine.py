@@ -11,7 +11,8 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "queued": {"queued", "running", "cancelled", "failed"},
     "running": {"running", "succeeded", "failed", "cancelled"},
     "succeeded": {"succeeded"},
-    "failed": {"failed"},
+    # 任务失败后只有 Harness 的重试路径可以回到 queued，普通调用不能复活终态。
+    "failed": {"failed", "queued"},
     "cancelled": {"cancelled"},
 }
 

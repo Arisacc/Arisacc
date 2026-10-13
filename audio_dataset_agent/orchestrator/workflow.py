@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from audio_dataset_agent.analyzers.vad import VADAnalyzer
 from audio_dataset_agent.core.models import Batch
@@ -60,10 +60,11 @@ def run_batch_pipeline(
     metadata_config: MetadataImportConfig | None = None,
     acoustic_consistency_analyzer: ConsistencyAnalyzer | None = None,
     repair_chain_mode: str = "single",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Batch:
     """运行从导入到导出的确定性流程。"""
     # graph 记录每一步的输入输出摘要，不参与业务判断，但会用于前端展示 Agent Graph。
-    graph = AgentGraphRecorder()
+    graph = AgentGraphRecorder(progress_callback=progress_callback)
     batch = _create_import_batch_with_trace(
         graph,
         input_dir,
@@ -199,9 +200,10 @@ def run_repair_enabled_pipeline(
     metadata_config: MetadataImportConfig | None = None,
     acoustic_consistency_analyzer: ConsistencyAnalyzer | None = None,
     repair_chain_mode: str = "single",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Batch:
     """运行包含修复执行和评估的完整流程。"""
-    graph = AgentGraphRecorder()
+    graph = AgentGraphRecorder(progress_callback=progress_callback)
     batch = _create_import_batch_with_trace(
         graph,
         input_dir,

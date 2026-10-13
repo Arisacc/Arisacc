@@ -24,6 +24,9 @@ class TestFastAPIHarnessServer(unittest.TestCase):
             unknown_events = client.get("/audio-dataset/jobs/missing/events")
             self.assertEqual(unknown_events.status_code, 404)
 
+            stream_route = client.get("/api/v1/runs/missing/events/stream")
+            self.assertEqual(stream_route.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

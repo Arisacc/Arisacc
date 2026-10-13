@@ -1,9 +1,10 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { useRunEvents } from '../hooks/useRunEvents'
 
-export type TargetPolicy = 'voice_clone' | 'tts' | 'asr'
+export type TargetPolicy = 'voice_clone'
 export type WorkflowName = 'basic' | 'repair'
 export type RepairChainMode = 'single' | 'auto'
-export type AsrMode = 'none' | 'fixed' | 'faster-whisper'
+export type AsrMode = 'none'
 export type VadMode = 'fixed' | 'wave-energy' | 'whole-file'
 export type StrategyAgentMode = 'baseline' | 'qwen-local'
 export type CuratorAgentMode = 'baseline' | 'qwen-local'
@@ -17,12 +18,12 @@ export type AudioRunRequest = {
   workflow: WorkflowName
   asr: AsrMode
   vad: VadMode
-  strategy_agent: StrategyAgentMode
-  curator_agent: CuratorAgentMode
-  report_agent: ReportAgentMode
-  qwen_model_path: string
-  qwen_max_new_tokens: number
-  llm_only_issue_samples: boolean
+  strategy_agent?: StrategyAgentMode
+  curator_agent?: CuratorAgentMode
+  report_agent?: ReportAgentMode
+  qwen_model_path?: string
+  qwen_max_new_tokens?: number
+  llm_only_issue_samples?: boolean
   curator_confidence_threshold: number
   speaker_consistency_check: boolean
   demo_transcript?: string
@@ -40,6 +41,11 @@ export type AudioRunRequest = {
   rag_documents: string
   rag_index: string
   rag_rebuild: boolean
+  msst_enabled: boolean
+  msst_missing_policy: 'error' | 'skip'
+  msst_model_name: string
+  msst_model_path: string
+  msst_config_path: string
 }
 
 export type JobProgress = {
@@ -61,6 +67,9 @@ export type AudioJob = {
   error_message: string | null
   cancel_requested: boolean
   progress: JobProgress
+  task_runtime?: { task_id: string; status: string; attempts: number; lease_owner?: string | null; lease_expires_at?: string | null } | null
+  checkpoint_path?: string | null
+  checkpoint_stage?: string | null
 }
 
 export type PortfolioResearch = {
@@ -97,6 +106,8 @@ export type AudioSample = {
   strategy_consistency?: string
   final_status: string
   final_audio_path?: string | null
+  manual_archive_group?: string | null
+  manual_archive_path?: string | null
   repair_chain_id?: string | null
   repair_chain?: Array<{ step_index: number; operation: string; parameters?: Record<string, unknown>; status?: string }>
 }
@@ -120,17 +131,11 @@ export type AudioSummary = {
 export const API_BASE = (import.meta.env.VITE_AUDIO_API_BASE || 'http://127.0.0.1:8000').replace(/\/$/, '')
 
 export const defaultRequest: AudioRunRequest = {
-  input_dir: '',
+  input_dir: 'E:\\Fin\\3\\项目源码\\datasets\\tset',
   target_policy: 'voice_clone',
   workflow: 'repair',
   asr: 'none',
   vad: 'whole-file',
-  strategy_agent: 'baseline',
-  curator_agent: 'baseline',
-  report_agent: 'deterministic',
-  qwen_model_path: 'local_tools/models/qwen/Qwen3-4B-Instruct-2507',
-  qwen_max_new_tokens: 192,
-  llm_only_issue_samples: true,
   curator_confidence_threshold: 0.8,
   speaker_consistency_check: false,
   demo_transcript: 'demo transcript',
@@ -148,10 +153,18 @@ export const defaultRequest: AudioRunRequest = {
   rag_documents: 'knowledge_base/documents',
   rag_index: 'local_tools/cache/rag/index.sqlite',
   rag_rebuild: false,
+  msst_enabled: false,
+  msst_missing_policy: 'error',
+  msst_model_name: 'deverb_bs_roformer_8_256dim_8depth',
+  msst_model_path: 'local_tools/models/msst/deverb_bs_roformer_8_256dim_8depth/deverb_bs_roformer_8_256dim_8depth.ckpt',
+  msst_config_path: 'local_tools/models/msst/deverb_bs_roformer_8_256dim_8depth/deverb_bs_roformer_8_256dim_8depth.ckpt.yaml',
 }
 
-export const policyLabels: Record<TargetPolicy, string> = { voice_clone: '声音克隆', tts: '语音合成', asr: '语音识别' }
-export const decisionLabels: Record<string, string> = { keep: '保留', reject: '拒绝', repair: '修复', review: '人工复核' }
+export const policyLabels: Record<TargetPolicy, string> = { voice_clone: '声音克隆' }
+export const decisionLabels: Record<string, string> = {
+  keep: '保留', reject: '拒绝', repair: '修复', review: '人工复核',
+  manual_keep: '人工保留', manual_reject: '人工拒绝', manual_repair: '人工修复', manual_review: '人工复核',
+}
 export const strategyLabels: Record<string, string> = {
   keep: '直接保留', keep_without_processing: '直接保留', prepare_for_export: '准备导出',
   reject: '拒绝样本', reject_sample: '拒绝样本', reject_low_quality: '质量过低，已拒绝', exclude_sample: '排除样本', exclude_clipped_sample: '排除削波样本',
@@ -161,9 +174,10 @@ export const strategyLabels: Record<string, string> = {
 
 export const pipelineStages = [
   { id: 'import', label: '导入', description: '扫描音频目录并匹配元数据。' },
+  { id: 'preprocess', label: '预处理', description: '按配置执行可选 MSST 去混响。' },
   { id: 'normalize', label: '标准化', description: '使用 FFmpeg 生成统一格式的分析副本。' },
   { id: 'vad', label: 'VAD 切分', description: '检测语音区间并生成候选样本。' },
-  { id: 'asr', label: '可选 ASR', description: '按用途生成候选文本和置信度。' },
+  { id: 'asr', label: '文本校验', description: '声音克隆数据线默认不依赖文本转写。' },
   { id: 'inspect', label: '质量分析', description: '整理音频、文本和批次一致性证据。' },
   { id: 'decide', label: 'Agent 决策', description: 'Strategy 提议，Curator 审核并判断去留。' },
   { id: 'repair', label: '修复复评', description: '执行受控工具链并重新分析结果。' },
@@ -189,12 +203,16 @@ export function jobReportUrl(job: AudioJob | null, reportName: string): string {
   return job ? `${API_BASE}/audio-dataset/jobs/${job.job_id}/reports/${reportName}` : ''
 }
 
+export function jobExportPackageUrl(job: AudioJob | null): string {
+  return job ? `${API_BASE}/audio-dataset/jobs/${job.job_id}/export-package` : ''
+}
+
 export function sampleAudioUrl(job: AudioJob | null, sampleId: string): string {
   return job ? `${API_BASE}/audio-dataset/jobs/${job.job_id}/audio?sample_id=${encodeURIComponent(sampleId)}` : ''
 }
 
 export function jobStatusLabel(status: JobStatus | undefined): string {
-  return status === 'running' ? '处理中' : status === 'queued' ? '排队中' : status === 'succeeded' ? '已完成' : status === 'failed' ? '失败' : status === 'cancelled' ? '已取消' : '演示数据'
+  return status === 'running' ? '处理中' : status === 'queued' ? '排队中' : status === 'succeeded' ? '已完成' : status === 'failed' ? '失败' : status === 'cancelled' ? '已取消' : '等待运行'
 }
 
 export function stageProgressIndex(progress: JobProgress | undefined, status: JobStatus | undefined): number {
@@ -206,8 +224,7 @@ export function stageProgressIndex(progress: JobProgress | undefined, status: Jo
 type PipelineContextValue = {
   form: AudioRunRequest
   setForm: React.Dispatch<React.SetStateAction<AudioRunRequest>>
-  updateTargetPolicy: (targetPolicy: TargetPolicy) => void
-  updateNumberField: (key: 'vad_min_duration_seconds' | 'vad_merge_gap_seconds' | 'qwen_max_new_tokens' | 'curator_confidence_threshold', value: string) => void
+  updateNumberField: (key: 'vad_min_duration_seconds' | 'vad_merge_gap_seconds' | 'curator_confidence_threshold', value: string) => void
   job: AudioJob | null
   summary: AudioSummary | null
   message: string
@@ -225,7 +242,7 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   const [form, setForm] = useState(defaultRequest)
   const [job, setJob] = useState<AudioJob | null>(null)
   const [summary, setSummary] = useState<AudioSummary | null>(null)
-  const [message, setMessage] = useState('请输入本地音频目录并启动处理任务。')
+  const [message, setMessage] = useState('等待选择音频目录并启动处理任务。')
   const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'offline'>('checking')
   const [submitting, setSubmitting] = useState(false)
 
@@ -281,8 +298,7 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
       .catch(() => undefined)
   }, [job?.job_id, job?.status])
 
-  const updateTargetPolicy = (targetPolicy: TargetPolicy) => setForm((current) => ({ ...current, target_policy: targetPolicy, asr: targetPolicy === 'voice_clone' ? current.asr : current.asr === 'none' ? 'fixed' : current.asr }))
-  const updateNumberField = (key: 'vad_min_duration_seconds' | 'vad_merge_gap_seconds' | 'qwen_max_new_tokens' | 'curator_confidence_threshold', value: string) => {
+  const updateNumberField = (key: 'vad_min_duration_seconds' | 'vad_merge_gap_seconds' | 'curator_confidence_threshold', value: string) => {
     const parsed = Number(value)
     setForm((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }))
   }
@@ -302,6 +318,16 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
+  useRunEvents(job?.job_id, job?.status, () => {
+    if (!job?.job_id) return
+    requestData<AudioJob>(`/audio-dataset/jobs/${job.job_id}`).then((nextJob) => {
+      setJob(nextJob)
+      if (nextJob.summary) setSummary(nextJob.summary)
+      if (nextJob.status === 'succeeded') setMessage('处理完成，结果已更新。')
+      if (nextJob.status === 'failed') setMessage(nextJob.error_message || '处理失败。')
+    }).catch(() => undefined)
+  })
+
   const cancelJob = async () => {
     if (!job || !['queued', 'running'].includes(job.status)) return
     try {
@@ -315,12 +341,15 @@ export function PipelineProvider({ children }: { children: React.ReactNode }) {
   const saveReviewOverride = async (sample: AudioSample, decision: string, transcript: string, note: string) => {
     if (!job) return
     await requestData(`/audio-dataset/jobs/${job.job_id}/review-overrides`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sample_id: sample.sample_id, decision, transcript, note }) })
+    const refreshed = await requestData<AudioJob>(`/audio-dataset/jobs/${job.job_id}`)
+    setJob(refreshed)
+    if (refreshed.summary) setSummary(refreshed.summary)
     setMessage('人工复核意见已保存。')
   }
 
   const resetSummary = () => setSummary(null)
 
-  const value = useMemo(() => ({ form, setForm, updateTargetPolicy, updateNumberField, job, summary, message, backendStatus, submitting, startJob, cancelJob, saveReviewOverride, resetSummary }), [form, job, summary, message, backendStatus, submitting])
+  const value = useMemo(() => ({ form, setForm, updateNumberField, job, summary, message, backendStatus, submitting, startJob, cancelJob, saveReviewOverride, resetSummary }), [form, job, summary, message, backendStatus, submitting])
   return <PipelineContext.Provider value={value}>{children}</PipelineContext.Provider>
 }
 

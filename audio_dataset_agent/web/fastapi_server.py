@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import mimetypes
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -24,6 +27,7 @@ from audio_dataset_agent.web.local_server import (
     resolve_report_path,
     resolve_sample_audio_path,
 )
+from audio_dataset_agent.web.package_export import create_export_package
 
 
 class RunRequestModel(BaseModel):
@@ -59,17 +63,28 @@ class RunRequestModel(BaseModel):
     rag_documents: str = "knowledge_base/documents"
     rag_index: str = "local_tools/cache/rag/index.sqlite"
     rag_rebuild: bool = False
+    msst_enabled: bool = False
+    msst_missing_policy: str = "error"
+    msst_model_name: str = "deverb_bs_roformer_8_256dim_8depth"
+    msst_model_path: str = "local_tools/models/msst/deverb_bs_roformer_8_256dim_8depth/deverb_bs_roformer_8_256dim_8depth.ckpt"
+    msst_config_path: str = "local_tools/models/msst/deverb_bs_roformer_8_256dim_8depth/deverb_bs_roformer_8_256dim_8depth.ckpt.yaml"
 
     @model_validator(mode="after")
     def validate_profile_options(self):
-        if self.target_policy not in {"tts", "asr", "voice_clone"}:
-            raise ValueError("target_policy 不受支持")
+        if self.target_policy != "voice_clone":
+            raise ValueError("当前只支持 voice_clone 数据处理")
         if self.workflow not in {"basic", "repair"}:
             raise ValueError("workflow 不受支持")
         if self.asr not in {"none", "fixed", "faster-whisper"}:
             raise ValueError("asr 不受支持")
+        if self.asr != "none":
+            raise ValueError("当前 voice_clone 正式流程不启用 ASR")
         if self.vad not in {"fixed", "wave-energy", "whole-file"}:
             raise ValueError("vad 不受支持")
+        if self.msst_missing_policy not in {"error", "skip"}:
+            raise ValueError("MSST 缺失策略只能是 error 或 skip")
+        if self.msst_model_name != "deverb_bs_roformer_8_256dim_8depth":
+            raise ValueError("当前只支持 deverb_bs_roformer_8_256dim_8depth 模型")
         return self
 
     def to_domain(self) -> RunRequest:
@@ -102,7 +117,7 @@ def create_app(
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
-    manager = AudioDatasetJobManager(runs_root)
+    manager = AudioDatasetJobManager(runs_root, queue_mode=True)
     app.state.manager = manager
     frontend_root = Path(frontend_dir).resolve() if frontend_dir else None
 
@@ -147,6 +162,42 @@ def create_app(
             raise HTTPException(status_code=404, detail="未找到任务") from exc
         return success(manager.store.list_events(job_id), "events loaded")
 
+    @app.get("/api/v1/runs/{job_id}/task")
+    def get_task(job_id: str):
+        try:
+            manager.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="未找到任务") from exc
+        task = manager.store.get_task_for_job(job_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="任务尚未入队")
+        return success(task, "task loaded")
+
+    @app.get("/api/v1/runs/{job_id}/events/stream")
+    async def stream_events(job_id: str, last_event_id: int = 0):
+        try:
+            manager.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="未找到任务") from exc
+
+        async def event_generator():
+            cursor = last_event_id
+            deadline = time.monotonic() + 3600
+            while time.monotonic() < deadline:
+                events = manager.store.list_events_after(job_id, cursor)
+                if events:
+                    for event in events:
+                        cursor = event["event_id"]
+                        yield f"id: {cursor}\nevent: {event['event_type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    continue
+                job = manager.get_job(job_id)
+                if job.status in {"succeeded", "failed", "cancelled"}:
+                    break
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
     @app.get("/audio-dataset/jobs/{job_id}/artifacts")
     def get_artifacts(job_id: str):
         try:
@@ -154,6 +205,19 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="未找到任务") from exc
         return success(manager.store.list_artifacts(job_id), "artifacts loaded")
+
+    @app.get("/audio-dataset/jobs/{job_id}/export-package")
+    def export_package(job_id: str):
+        try:
+            job = manager.get_job(job_id)
+            if not job.batch_export_dir:
+                raise ValueError("批次尚未导出")
+            package = create_export_package(job.batch_export_dir)
+            return FileResponse(package, filename="voice_clone_dataset_package.zip", media_type="application/zip")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="未找到任务") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/audio-dataset/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
@@ -167,6 +231,15 @@ def create_app(
         try:
             job = manager.get_job(job_id)
             result = apply_manual_review_override(job, payload.model_dump())
+            # 复核结果和归档路径需要进入 SQLite，服务重启后仍能回读。
+            manager.store.upsert_run(job.to_dict())
+            manager.store.append_event(
+                job_id,
+                event_type="manual_review_applied",
+                stage="review",
+                status="succeeded",
+                payload=result,
+            )
             return success(result, "人工复核意见已保存")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="未找到任务") from exc

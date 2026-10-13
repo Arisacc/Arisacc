@@ -1,7 +1,7 @@
-import { Activity, Archive, AudioLines, Bot, FileAudio, FolderOpen, GitBranch, Wrench } from 'lucide-react'
+import { Activity, Archive, AudioLines, Bot, FileAudio, FolderOpen, GitBranch, Sparkles, Wrench } from 'lucide-react'
 import { pipelineStages, stageProgressIndex, usePipeline } from '../state/PipelineContext'
 
-const icons = [FolderOpen, FileAudio, AudioLines, Bot, Activity, GitBranch, Wrench, Archive]
+const icons = [FolderOpen, Sparkles, FileAudio, AudioLines, Bot, Activity, GitBranch, Wrench, Archive]
 
 export function PipelineStepper() {
   const { job } = usePipeline()

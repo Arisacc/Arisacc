@@ -1,15 +1,9 @@
 import { useRef, useState } from 'react'
-import { AudioLines, Bot, Database, FileText, FolderOpen, Gauge, HardDrive, Save, Settings2, UploadCloud, Wrench } from 'lucide-react'
-import { API_BASE, policyLabels, TargetPolicy, usePipeline } from '../state/PipelineContext'
-
-const profileNotes: Record<TargetPolicy, string> = {
-  voice_clone: '重点检查音色稳定、噪声、静音和削波，文本不是硬性要求。',
-  tts: '重点检查参考文本完整性和音频文本匹配关系。',
-  asr: '重点检查语音可识别性、转写置信度和候选文本质量。',
-}
+import { Database, FileText, FolderOpen, Gauge, HardDrive, Save, Settings2, UploadCloud, Wrench } from 'lucide-react'
+import { API_BASE, usePipeline } from '../state/PipelineContext'
 
 export function SettingsSection({ onRun }: { onRun?: () => Promise<void> }) {
-  const { form, setForm, updateTargetPolicy, updateNumberField, startJob, submitting, resetSummary, summary } = usePipeline()
+  const { form, setForm, updateNumberField, startJob, submitting, resetSummary, summary } = usePipeline()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [directoryName, setDirectoryName] = useState('')
   const [directoryFileCount, setDirectoryFileCount] = useState(0)
@@ -53,7 +47,7 @@ export function SettingsSection({ onRun }: { onRun?: () => Promise<void> }) {
   return <>
     <section className="glassPanel settingsSection" data-reveal>
       <div className="panelHeader"><div><p className="sectionKicker">PROFILE</p><h2>数据用途</h2></div><Database size={16} /></div>
-      <div className="profileCards">{(['voice_clone', 'tts', 'asr'] as TargetPolicy[]).map((policy) => <button type="button" className={`profileCard ${form.target_policy === policy ? 'selected' : ''}`} aria-pressed={form.target_policy === policy} onClick={() => updateTargetPolicy(policy)} key={policy}><span className="profileIcon"><AudioLines size={17} /></span><strong>{policyLabels[policy]}</strong><small>{profileNotes[policy]}</small></button>)}</div>
+      <div className="profileCards"><div className="profileCard selected" aria-label="当前数据用途：声音克隆"><span className="profileIcon"><Database size={17} /></span><strong>声音克隆</strong><small>重点检查音色稳定、噪声、静音和削波，文本不是硬性要求。</small></div></div>
     </section>
 
     <div className="settingsGrid">
@@ -64,25 +58,20 @@ export function SettingsSection({ onRun }: { onRun?: () => Promise<void> }) {
         <div className="rangeField"><div><label htmlFor="curator-threshold">Curator 置信度阈值</label><output>{form.curator_confidence_threshold.toFixed(2)}</output></div><input id="curator-threshold" type="range" min="0.5" max="0.95" step="0.05" value={form.curator_confidence_threshold} onChange={(event) => updateNumberField('curator_confidence_threshold', event.target.value)} /><small>置信度越高，进入人工复核的样本越少。</small></div>
         <label className="checkField"><input type="checkbox" checked={form.speaker_consistency_check} onChange={(event) => setForm({ ...form, speaker_consistency_check: event.target.checked })} /><span>启用批次声学一致性检查</span></label>
         <small className="fieldHint">默认关闭。开启后会比较 voice_clone 批次内的响度、静音和噪声差异，异常批次可能增加人工复核。</small>
-        <div className="readonlyThresholds"><span>当前质量分界</span><b>SNR 下限建议从 15dB 起步；最终阈值仍由 DatasetProfile 和实际分布校准。</b></div>
+        <div className="readonlyThresholds"><span>当前质量分界</span><b>SNR 下限建议从 15dB 起步；最终阈值仍由声音克隆用途画像和实际分布校准。</b></div>
       </section>
 
       <section className="glassPanel settingsSection" data-reveal>
-        <div className="panelHeader"><div><p className="sectionKicker">ENGINES</p><h2>工具与模型</h2></div><Wrench size={16} /></div>
+        <div className="panelHeader"><div><p className="sectionKicker">PROCESSING</p><h2>处理方式</h2></div><Wrench size={16} /></div>
         <label className="formField"><span>VAD 引擎</span><select value={form.vad} onChange={(event) => setForm({ ...form, vad: event.target.value as typeof form.vad })}><option value="whole-file">整段音频</option><option value="wave-energy">能量检测</option><option value="fixed">固定测试切分</option></select></label>
-        <label className="formField"><span>ASR 引擎</span><select value={form.asr} onChange={(event) => setForm({ ...form, asr: event.target.value as typeof form.asr })}><option value="none">不启用</option><option value="fixed">固定测试文本</option><option value="faster-whisper">faster-whisper</option></select></label>
-        <label className="formField"><span>ASR 语言</span><input value="zh" readOnly aria-label="ASR 语言" /></label>
         <label className="formField"><span>流程</span><select value={form.workflow} onChange={(event) => setForm({ ...form, workflow: event.target.value as typeof form.workflow })}><option value="repair">含修复流程</option><option value="basic">基础流程</option></select></label>
         <p className="selectNote">{form.workflow === 'basic' ? '扫描 → 标准化 → VAD → 分析 → 决策 → 导出' : '在基础流程上增加 修复/复评 环节，自动 repair 低质量样本'}</p>
-      </section>
-
-      <section className="glassPanel settingsSection" data-reveal>
-        <div className="panelHeader"><div><p className="sectionKicker">AGENTS</p><h2>Agent 执行器</h2></div><Bot size={16} /></div>
-        <label className="formField"><span>Strategy Agent</span><select value={form.strategy_agent} onChange={(event) => setForm({ ...form, strategy_agent: event.target.value as typeof form.strategy_agent })}><option value="baseline">规则基线</option><option value="qwen-local">本地 Qwen</option></select></label>
-        <label className="formField"><span>Curator Agent</span><select value={form.curator_agent} onChange={(event) => setForm({ ...form, curator_agent: event.target.value as typeof form.curator_agent })}><option value="baseline">规则基线</option><option value="qwen-local">本地 Qwen</option></select></label>
-        <label className="formField"><span>Report Agent</span><select value={form.report_agent} onChange={(event) => setForm({ ...form, report_agent: event.target.value as typeof form.report_agent })}><option value="deterministic">确定性报告</option><option value="qwen-local">本地 Qwen</option></select></label>
-        <label className="formField"><span>Qwen 模型路径</span><input value={form.qwen_model_path} onChange={(event) => setForm({ ...form, qwen_model_path: event.target.value })} /></label>
-        <label className="formField"><span>输出长度</span><input type="number" min="32" max="1024" step="32" value={form.qwen_max_new_tokens} onChange={(event) => updateNumberField('qwen_max_new_tokens', event.target.value)} /></label>
+        <label className="checkField"><input type="checkbox" checked={form.msst_enabled} onChange={(event) => setForm({ ...form, msst_enabled: event.target.checked })} /><span>运行 MSST 去混响</span></label>
+        <small className="fieldHint">仅支持 deverb_bs_roformer_8_256dim_8depth；模型和配置文件均存在且运行时可用时执行。</small>
+        {form.msst_enabled && <>
+          <label className="formField"><span>MSST 模型</span><select value={form.msst_model_name} onChange={(event) => setForm({ ...form, msst_model_name: event.target.value })}><option value="deverb_bs_roformer_8_256dim_8depth">BS-Roformer 去混响（约 163MB）</option></select></label>
+          <label className="formField"><span>模型缺失时</span><select value={form.msst_missing_policy} onChange={(event) => setForm({ ...form, msst_missing_policy: event.target.value as 'error' | 'skip' })}><option value="error">阻断任务并报错</option><option value="skip">跳过 MSST，继续处理</option></select></label>
+        </>}
       </section>
 
       <section className="glassPanel settingsSection" data-reveal>
@@ -99,7 +88,6 @@ export function SettingsSection({ onRun }: { onRun?: () => Promise<void> }) {
         </div>
         <label className="formField"><span>元数据文件</span><input value={form.metadata_path} placeholder="可留空自动查找" onChange={(event) => setForm({ ...form, metadata_path: event.target.value })} /></label>
         <label className="checkField"><input type="checkbox" checked={form.use_sidecar_text} onChange={(event) => setForm({ ...form, use_sidecar_text: event.target.checked })} /><span>读取同名 TXT 参考文本</span></label>
-        <label className="checkField"><input type="checkbox" checked={form.llm_only_issue_samples} onChange={(event) => setForm({ ...form, llm_only_issue_samples: event.target.checked })} /><span>仅问题样本调用 Qwen</span></label>
       </section>
     </div>
     <div className="settingsActions"><span><FileText size={14} /> 配置会随下一次运行请求发送</span><button className="primaryAction" type="button" onClick={run} disabled={submitting || uploading}><Save size={15} /> {uploading ? '准备文件中' : submitting ? '启动中' : '开始处理'}</button></div>
@@ -107,5 +95,5 @@ export function SettingsSection({ onRun }: { onRun?: () => Promise<void> }) {
 }
 
 export function SettingsPage() {
-  return <div className="pageContent settingsPage"><header className="pageHeading"><div><p className="sectionKicker">SETTINGS / 04</p><h2>处理配置</h2><p>设置数据用途、音频分析方式和本地 Agent 执行器。</p></div><span className="routeBadge"><Settings2 size={14} /> 当前配置</span></header><SettingsSection /></div>
+  return <div className="pageContent settingsPage"><header className="pageHeading"><div><p className="sectionKicker">SETTINGS / 04</p><h2>处理配置</h2><p>设置声音克隆数据的切分、质量分析和修复流程。</p></div><span className="routeBadge"><Settings2 size={14} /> 当前配置</span></header><SettingsSection /></div>
 }

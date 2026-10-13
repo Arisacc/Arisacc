@@ -56,15 +56,18 @@ class HarnessRuntime:
         stage: str,
         status: str,
         artifacts: list[dict[str, Any]] | None = None,
+        state: dict[str, Any] | None = None,
     ) -> Path:
         """用原子替换写入 checkpoint，避免进程中断时留下半个 JSON。"""
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        previous_state = self.load_checkpoint(checkpoint_path)
         payload = {
             "job_id": job_id,
             "stage": stage,
             "status": status,
             "artifacts": artifacts or [],
             "updated_at": _now_iso(),
+            "state": state if state is not None else (previous_state or {}).get("state"),
         }
         temporary_path = checkpoint_path.with_suffix(".tmp")
         temporary_path.write_text(
@@ -80,6 +83,15 @@ class HarnessRuntime:
             payload={"checkpoint_path": str(checkpoint_path), "artifact_count": len(payload["artifacts"])},
         )
         return checkpoint_path
+
+    @staticmethod
+    def load_checkpoint(checkpoint_path: Path) -> dict[str, Any] | None:
+        """读取完整 checkpoint；损坏的快照视为不存在，由调用方从头运行。"""
+        try:
+            payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def register_artifacts(self, job_id: str, artifacts: list[dict[str, Any]]) -> None:
         for artifact in artifacts:
