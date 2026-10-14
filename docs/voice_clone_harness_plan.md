@@ -8,9 +8,8 @@
 
 - 后端：FastAPI、Pydantic、SQLite WAL、标准库线程 Worker。
 - 处理：FFmpeg、VAD、Inspector、Strategy、Curator、Repair、Manifest/报告导出。
-- 前端：React 19、TypeScript、Vite、React Router、Fetch/SSE、原生 CSS。
+- 前端：React 19、TypeScript、原生 CSS。
 - 不接入 SoVITS 训练；输出可直接交给后续训练系统的音频数据包和追溯文件。
-- 本阶段不引入 PostgreSQL、Redis、Celery、Docker，避免为单机/小规模云服务器增加非必要运维面。
 
 ## 分阶段闭环
 
@@ -20,4 +19,3 @@
 4. 前端收口：只展示 voice_clone、已接通的 VAD/流程/阈值/目录选择和真实 Run 状态，移除假 ASR/模型/Agent 配置。
 5. 实时交互：SSE 优先、轮询兜底，显示当前阶段、Worker、checkpoint 和失败原因。
 6. E2E 验证：生成临时 WAV，提交 Run，Worker 执行，断言 SQLite、manifest、报告、checkpoint、事件和前端页面一致。
-7. 发布同步：正式版通过验证后，清理缓存/测试数据/虚拟环境，再同步到 GitHub 轻量版。
