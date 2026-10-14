@@ -98,6 +98,26 @@ local_tools/models/msst/deverb_bs_roformer_8_256dim_8depth/
 启用 MSST 后，模型会在项目 Worker 进程内直接加载，不需要另外启动 MSST-WebUI。
 该可选依赖会安装 `pymss` 及其音频处理依赖；PyTorch 体积较大。若使用 NVIDIA GPU，请先按本机 CUDA/驱动选择并安装匹配的 PyTorch 版本，再安装该文件中的依赖。仓库不包含 MSST 权重文件。
 
+## 一键下载模型
+
+双击项目根目录的 `download_models.bat`，可交互选择：
+
+| 模型 | 保存目录 | 用途 | 预计大小 |
+| --- | --- | --- | ---: |
+| Qwen3-4B-Instruct | `local_tools/models/qwen/Qwen3-4B-Instruct-2507` | 本地 Agent 推理 | 约 7.5 GiB |
+| faster-whisper-small | `local_tools/models/faster-whisper/small` | ASR 候选文本 | 约 486 MB |
+| MSST BS-Roformer | `local_tools/models/msst/deverb_bs_roformer_8_256dim_8depth` | 去混响 | 约 163MB |
+
+也可以命令行选择：
+
+```powershell
+.\.venv\Scripts\python.exe local_tools\download_models.py --model msst --yes
+.\.venv\Scripts\python.exe local_tools\download_models.py --model qwen --provider modelscope --yes
+.\.venv\Scripts\python.exe local_tools\download_models.py --model faster-whisper --yes
+```
+
+模型权重不会提交到 GitHub。脚本可以重复执行，已经存在的文件会跳过。
+
 模型缺失策略：
 
 - `阻断任务并报错`：严格模式，缺失模型或运行时就停止。
@@ -124,9 +144,12 @@ frontend/dist/          可直接启动的前端构建产物
 knowledge_base/         本地音频工具和数据规范知识库
 local_tools/            工具说明、模型目录和辅助脚本
 tests/                  单元测试和集成测试
+docs/                   使用说明
+scripts/                开发与调试辅助脚本
 start_client.bat        一键启动客户端
-start_worker.bat        单独启动 Worker
-运行说明.md             本地运行说明
+stop_client.bat         一键停止客户端
+download_models.bat     可选模型下载入口
+docs/运行说明.md        本地运行说明
 ```
 
 ## 测试

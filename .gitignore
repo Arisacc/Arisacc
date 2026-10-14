@@ -1,7 +1,14 @@
 .env
 local_tools/cache/
 local_tools/venv/
+local_tools/models/**
+!local_tools/models/msst/
+!local_tools/models/msst/README.md
+local_tools/deepfilternet/*.exe
+.venv/
 frontend/node_modules/
-frontend/dist/
 __pycache__/
 *.pyc
+.playwright/
+.playwright-cli/
+.pytest_cache/

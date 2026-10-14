@@ -131,7 +131,7 @@ export type AudioSummary = {
 export const API_BASE = (import.meta.env.VITE_AUDIO_API_BASE || 'http://127.0.0.1:8000').replace(/\/$/, '')
 
 export const defaultRequest: AudioRunRequest = {
-  input_dir: 'E:\\Fin\\3\\项目源码\\datasets\\tset',
+  input_dir: '',
   target_policy: 'voice_clone',
   workflow: 'repair',
   asr: 'none',

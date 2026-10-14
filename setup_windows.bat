@@ -22,7 +22,7 @@ if errorlevel 1 exit /b 1
 where npm.cmd >nul 2>nul
 if errorlevel 1 (
   if not exist "frontend\dist\index.html" (
-    echo 未找到 Node.js，且仓库中没有前端构建产物。
+    echo 未找到 Node.js，且前端构建产物不存在。
     exit /b 1
   )
 ) else (
@@ -40,5 +40,5 @@ if errorlevel 1 (
   popd
 )
 
-echo 初始化完成。运行 start_client.bat 启动项目。
+echo 初始化完成。请运行 start_client.bat 启动项目。
 endlocal

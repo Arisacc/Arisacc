@@ -4,19 +4,45 @@
 
 ## 目录约定
 
-- `venv/`：项目专用 Python 运行环境。
+- `.venv/`：由 `setup_windows.bat` 创建的项目 Python 运行环境。
 - `models/`：可选模型目录，发布版默认不提供，需要模型推理时手动放入。
 - `deepfilternet/`：可选的 DeepFilterNet CLI。
 - `ffmpeg/`：手工放置的 FFmpeg 发行版；当前优先使用 `imageio-ffmpeg` 提供的可执行文件。
 - `downloads/`、`python_packages/`：离线安装包或下载中间文件。
 - `cache/`：运行时自动创建的任务产物缓存，不作为项目源码阅读内容。
 
-## Python 环境
+## 一键下载模型
 
-项目命令统一使用：
+项目根目录运行：
 
 ```powershell
-.\local_tools\venv\python.exe
+.\download_models.bat
+```
+
+脚本会让用户选择并下载：
+
+| 选项 | 默认目录 | 用途 | 预计大小 |
+| --- | --- | --- | ---: |
+| Qwen3-4B-Instruct | `local_tools/models/qwen/Qwen3-4B-Instruct-2507` | 本地 Agent 推理 | 约 8GB |
+| faster-whisper-small | `local_tools/models/faster-whisper/small` | ASR 候选文本 | 约 486MB |
+| MSST BS-Roformer | `local_tools/models/msst/deverb_bs_roformer_8_256dim_8depth` | 去混响 | 约 163MB |
+
+也可以非交互式下载：
+
+```powershell
+.\.venv\Scripts\python.exe local_tools\download_models.py --model msst --yes
+.\.venv\Scripts\python.exe local_tools\download_models.py --model qwen --provider modelscope --yes
+.\.venv\Scripts\python.exe local_tools\download_models.py --model faster-whisper --yes
+```
+
+模型权重不会提交到 GitHub。下载脚本支持重复执行，已经存在的文件会跳过。
+
+## Python 环境
+
+通过 `setup_windows.bat` 创建环境后，项目命令统一使用：
+
+```powershell
+.\.venv\Scripts\python.exe
 ```
 
 已验证的核心依赖包括：`torch`、`torchaudio`、`numpy`、`soundfile`、`silero-vad`、`faster-whisper`、`imageio-ffmpeg`、`transformers`、`accelerate` 和 `safetensors`。
@@ -26,14 +52,8 @@
 ### FFmpeg
 
 - 用途：格式标准化、候选片段裁剪、响度标准化、静音裁剪和轻量降噪。
-- 当前来源：`imageio-ffmpeg`。
-- 当前可执行文件通常位于：
-
-```text
-E:\Fin\3\项目源码\local_tools\venv\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe
-```
-
-代码会先尝试系统 `ffmpeg`，找不到时自动回退到该本地可执行文件。
+- 当前来源：系统 `ffmpeg` 或 `imageio-ffmpeg`。
+- 代码会先尝试系统 `ffmpeg`，找不到时自动回退到当前 Python 环境中 `imageio-ffmpeg` 提供的可执行文件。
 
 ### Silero VAD
 
@@ -42,7 +62,7 @@ E:\Fin\3\项目源码\local_tools\venv\Lib\site-packages\imageio_ffmpeg\binaries
 - 验证导入：
 
 ```powershell
-.\local_tools\venv\python.exe -c "from silero_vad import load_silero_vad, read_audio, get_speech_timestamps; print('silero import ok')"
+.\.venv\Scripts\python.exe -c "from silero_vad import load_silero_vad, read_audio, get_speech_timestamps; print('silero import ok')"
 ```
 
 ### faster-whisper
@@ -52,7 +72,7 @@ E:\Fin\3\项目源码\local_tools\venv\Lib\site-packages\imageio_ffmpeg\binaries
 - 发布版未包含 faster-whisper 模型权重；运行 ASR 前需要自行放入模型目录。
 
 ```powershell
-.\local_tools\venv\python.exe -c "from faster_whisper import WhisperModel; print('faster-whisper import ok')"
+.\.venv\Scripts\python.exe -c "from faster_whisper import WhisperModel; print('faster-whisper import ok')"
 ```
 
 ### DeepFilterNet
